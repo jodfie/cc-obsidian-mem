@@ -19,8 +19,7 @@ export interface Config {
   };
   summarization: {
     enabled: boolean;
-    model: string;
-    apiKeyEnvVar: string;
+    model: string; // Agent SDK model: 'sonnet', 'opus', 'haiku', or full model ID
     sessionSummary: boolean;
     errorSummary: boolean;
   };
@@ -50,6 +49,8 @@ export interface Session {
   filesModified: string[];
   commandsRun: number;
   errorsEncountered: number;
+  /** Knowledge paths captured during pre-compact, to be linked at session end */
+  preCompactKnowledge?: string[];
 }
 
 export interface Observation {
@@ -126,6 +127,8 @@ export interface SearchResult {
 
 export type NoteType = 'session' | 'error' | 'decision' | 'pattern' | 'file' | 'learning';
 
+export type NoteStatus = 'active' | 'superseded' | 'draft';
+
 export interface NoteFrontmatter {
   type: NoteType;
   title?: string;
@@ -134,6 +137,12 @@ export interface NoteFrontmatter {
   updated: string;
   tags: string[];
   aliases?: string[];
+  /** Note status - active (default), superseded, or draft */
+  status?: NoteStatus;
+  /** Wikilink to the note that supersedes this one */
+  superseded_by?: string;
+  /** Wikilinks to notes that this note supersedes */
+  supersedes?: string[];
   [key: string]: unknown;
 }
 
@@ -155,6 +164,12 @@ export interface WriteNoteInput {
   append?: boolean;
   /** When true, preserves existing frontmatter fields (created, user tags, custom metadata) */
   preserveFrontmatter?: boolean;
+  /** Note status - active (default), superseded, or draft */
+  status?: NoteStatus;
+  /** Path to note that supersedes this one (for marking as superseded) */
+  superseded_by?: string;
+  /** Paths to notes that this note supersedes */
+  supersedes?: string[];
 }
 
 /**

@@ -5,6 +5,20 @@ import type { ProjectInfo, Observation, PostToolUseInput, ProjectContext } from 
 import { LANGUAGE_MAP } from '../../../src/shared/constants.js';
 
 /**
+ * Find the git root directory by searching up the directory tree
+ */
+function findGitRoot(startDir: string): string | null {
+  let dir = startDir;
+  while (dir !== path.dirname(dir)) {
+    if (fs.existsSync(path.join(dir, '.git'))) {
+      return dir;
+    }
+    dir = path.dirname(dir);
+  }
+  return null;
+}
+
+/**
  * Get project info from the current working directory
  */
 export async function getProjectInfo(cwd: string): Promise<ProjectInfo> {
@@ -13,9 +27,10 @@ export async function getProjectInfo(cwd: string): Promise<ProjectInfo> {
     path: cwd,
   };
 
-  // Try to get git info
-  const gitDir = path.join(cwd, '.git');
-  if (fs.existsSync(gitDir)) {
+  // Try to get git info by searching up the directory tree
+  const gitRoot = findGitRoot(cwd);
+  if (gitRoot) {
+    const gitDir = path.join(gitRoot, '.git');
     try {
       // Get remote URL
       const configPath = path.join(gitDir, 'config');

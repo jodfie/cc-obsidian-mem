@@ -91,8 +91,7 @@ Or manually create `~/.cc-obsidian-mem/config.json`:
   },
   "summarization": {
     "enabled": true,
-    "model": "claude-sonnet-4-5-20250514",
-    "apiKeyEnvVar": "ANTHROPIC_API_KEY",
+    "model": "sonnet",
     "sessionSummary": true,
     "errorSummary": true
   },
@@ -105,6 +104,8 @@ Or manually create `~/.cc-obsidian-mem/config.json`:
   }
 }
 ```
+
+> **Note**: AI summarization uses the Claude Code SDK (via `claude -p` CLI), so no separate API key is required. Valid model values: `sonnet`, `opus`, `haiku`.
 
 ## Usage
 
@@ -146,6 +147,7 @@ The MCP server provides these tools:
 | `mem_search` | Search notes by query, project, type, or tags |
 | `mem_read` | Read a specific note's content |
 | `mem_write` | Create or update notes |
+| `mem_supersede` | Create a new note that supersedes an existing one (bidirectional links) |
 | `mem_project_context` | Get context for a project |
 | `mem_list_projects` | List all tracked projects |
 
@@ -154,20 +156,39 @@ The MCP server provides these tools:
 ```
 vault/
 ├── _claude-mem/
-│   ├── _index.md                # Dashboard with Dataview queries
+│   ├── index.md                     # Dashboard with Dataview queries
 │   ├── projects/
 │   │   └── {project-name}/
-│   │       ├── _index.md        # Project overview
-│   │       ├── sessions/        # Session logs
-│   │       ├── errors/          # Error patterns
-│   │       ├── decisions/       # Architectural decisions
-│   │       └── files/           # File-specific knowledge
+│   │       ├── {project-name}.md    # Project overview (base note)
+│   │       ├── sessions/
+│   │       │   ├── sessions.md      # Category index
+│   │       │   └── *.md             # Session logs
+│   │       ├── errors/
+│   │       │   ├── errors.md        # Category index
+│   │       │   └── *.md             # Error patterns
+│   │       ├── decisions/
+│   │       │   ├── decisions.md     # Category index
+│   │       │   └── *.md             # Architectural decisions
+│   │       ├── knowledge/
+│   │       │   ├── knowledge.md     # Category index
+│   │       │   └── *.md             # Q&A, explanations, research
+│   │       ├── research/
+│   │       │   ├── research.md      # Category index
+│   │       │   └── *.md             # External research notes
+│   │       └── files/
+│   │           ├── files.md         # Category index
+│   │           └── *.md             # File-specific knowledge
 │   ├── global/
-│   │   ├── patterns/            # Reusable patterns
-│   │   ├── tools/               # Tool usage notes
-│   │   └── learnings/           # General learnings
-│   └── templates/               # Note templates
+│   │   ├── patterns/                # Reusable patterns
+│   │   ├── tools/                   # Tool usage notes
+│   │   └── learnings/               # General learnings
+│   └── templates/                   # Note templates
 ```
+
+Notes follow a hierarchical linking structure for proper Obsidian graph navigation:
+- Individual notes link to their category index via `parent` frontmatter
+- Category indexes link to the project base
+- Superseded notes link bidirectionally (old → new via `superseded_by`, new → old via `supersedes`)
 
 ## Obsidian Features Used
 
@@ -218,9 +239,10 @@ cd plugin && bun run build
 4. Check `~/.cc-obsidian-mem/sessions/` for session files
 
 ### AI summaries not working
-1. Verify `ANTHROPIC_API_KEY` environment variable is set
-2. Check `summarization.enabled` is `true` in config
-3. Ensure API key has access to the configured model
+1. Check `summarization.enabled` is `true` in config
+2. Verify `model` is a valid value: `sonnet`, `opus`, or `haiku`
+3. Check background summarization log: `cat /tmp/cc-obsidian-mem-background.log`
+4. Ensure Claude Code CLI is available: `which claude`
 
 ### Plugin not loading
 1. Run `/plugin` to verify the plugin is installed

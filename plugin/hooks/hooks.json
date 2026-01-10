@@ -12,6 +12,17 @@
         ]
       }
     ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun run \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/user-prompt-submit.ts\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "matcher": "*",
@@ -20,6 +31,18 @@
             "type": "command",
             "command": "bun run \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/post-tool-use.ts\"",
             "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "auto|manual",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun run \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/pre-compact.ts\"",
+            "timeout": 60
           }
         ]
       }

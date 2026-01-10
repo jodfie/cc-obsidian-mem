@@ -19,7 +19,7 @@ async function main() {
 
   const server = new McpServer({
     name: 'obsidian-mem',
-    version: '0.1.0',
+    version: '0.3.0',
   });
 
   // Tool: mem_search - Search the knowledge base
@@ -31,21 +31,67 @@ async function main() {
       inputSchema: {
         query: z.string().describe('Search query - natural language or keywords'),
         project: z.string().optional().describe('Filter by project name'),
-        type: z.enum(['session', 'error', 'decision', 'pattern', 'file', 'learning']).optional().describe('Filter by note type'),
+        type: z.enum(['session', 'error', 'decision', 'pattern', 'file', 'learning', 'knowledge']).optional().describe('Filter by note type. Use "knowledge" to search all knowledge notes (qa, explanation, decision, research, learning)'),
         tags: z.array(z.string()).optional().describe('Filter by tags'),
         limit: z.number().default(10).describe('Maximum number of results'),
       },
     },
     async ({ query, project, type, tags, limit }): Promise<ToolResult> => {
       try {
-        const results = await vault.searchNotes(query, {
-          project,
-          type,
-          tags,
-          limit,
-        });
+        // Map NoteType to knowledge_type for knowledge search
+        // 'knowledge' type searches ALL knowledge types (qa, explanation, decision, research, learning)
+        const knowledgeTypeMap: Record<string, string | string[] | undefined> = {
+          'knowledge': undefined, // undefined = search all knowledge types
+          'learning': 'learning',
+          'decision': 'decision',
+          // These types only exist in regular notes, so skip knowledge search
+          'session': undefined,
+          'error': undefined,
+          'pattern': undefined,
+          'file': undefined,
+        };
 
-        const output = formatSearchResults(results);
+        // Determine what to search
+        const isKnowledgeOnlySearch = type === 'knowledge';
+        const regularNoteType = isKnowledgeOnlySearch ? undefined : type;
+
+        // Search regular notes (skip if searching only knowledge)
+        let regularResults: SearchResult[] = [];
+        if (!isKnowledgeOnlySearch) {
+          regularResults = await vault.searchNotes(query, {
+            project,
+            type: regularNoteType,
+            tags,
+            limit,
+          });
+        }
+
+        // Only search knowledge if type filter allows it
+        // - No type filter: search both regular notes and all knowledge
+        // - 'knowledge' type: search all knowledge types (skip regular notes)
+        // - 'learning' or 'decision': search specific knowledge type
+        // - Other types (session, error, etc.): skip knowledge search
+        let knowledgeResults: SearchResult[] = [];
+        const shouldSearchKnowledge = !type || type === 'knowledge' || type === 'learning' || type === 'decision';
+
+        if (shouldSearchKnowledge) {
+          const knowledgeType = type === 'knowledge' || !type
+            ? undefined // search all knowledge types
+            : knowledgeTypeMap[type] as 'qa' | 'explanation' | 'decision' | 'research' | 'learning' | undefined;
+
+          knowledgeResults = await vault.searchKnowledge(query, {
+            project,
+            knowledgeType,
+            limit: isKnowledgeOnlySearch ? limit : Math.max(5, limit - regularResults.length),
+          });
+        }
+
+        // Combine and sort by score
+        const allResults = [...regularResults, ...knowledgeResults]
+          .sort((a, b) => b.score - a.score)
+          .slice(0, limit);
+
+        const output = formatSearchResults(allResults);
 
         return {
           content: [{ type: 'text', text: output }],
@@ -101,10 +147,19 @@ async function main() {
         tags: z.array(z.string()).optional().describe('Additional tags'),
         path: z.string().optional().describe('Custom path (auto-generated if not provided)'),
         append: z.boolean().optional().describe('Append to existing note instead of replacing'),
+        status: z.enum(['active', 'superseded', 'draft']).optional().describe('Note status (default: active)'),
+        supersedes: z.array(z.string()).optional().describe('Wikilinks to notes this supersedes (e.g., ["[[path/to/old-note]]"])'),
       },
     },
-    async ({ type, title, content, project, tags, path, append }): Promise<ToolResult> => {
+    async ({ type, title, content, project, tags, path, append, status, supersedes }): Promise<ToolResult> => {
       try {
+        // Warn if supersedes is provided - should use mem_supersede instead
+        let warning = '';
+        if (supersedes && supersedes.length > 0) {
+          warning = '\n\nNote: `supersedes` was provided but mem_write only creates one-way links. ' +
+            'Use mem_supersede to create bidirectional supersedes/superseded_by links.';
+        }
+
         const result = await vault.writeNote({
           type,
           title,
@@ -113,15 +168,57 @@ async function main() {
           tags,
           path,
           append,
+          status,
+          supersedes,
         });
 
         const action = result.created ? 'Created' : 'Updated';
         return {
-          content: [{ type: 'text', text: `${action} note: ${result.path}` }],
+          content: [{ type: 'text', text: `${action} note: ${result.path}${warning}` }],
         };
       } catch (error) {
         return {
           content: [{ type: 'text', text: `Failed to write note: ${error}` }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // Tool: mem_supersede - Supersede an existing note with a new one
+  server.registerTool(
+    'mem_supersede',
+    {
+      title: 'Supersede Note',
+      description: 'Create a new note that supersedes an existing one. Automatically creates bidirectional links: the old note is marked as superseded with a link to the new note, and the new note links back to the old one.',
+      inputSchema: {
+        oldNotePath: z.string().describe('Path to the note being superseded (relative to vault, e.g., "projects/my-project/knowledge/old-note.md")'),
+        type: z.enum(['session', 'error', 'decision', 'pattern', 'file', 'learning']).describe('Type of new note to create'),
+        title: z.string().describe('Title for the new note'),
+        content: z.string().describe('Markdown content for the new note'),
+        project: z.string().optional().describe('Project name to associate with'),
+        tags: z.array(z.string()).optional().describe('Additional tags'),
+      },
+    },
+    async ({ oldNotePath, type, title, content, project, tags }): Promise<ToolResult> => {
+      try {
+        const result = await vault.supersedeNote(oldNotePath, {
+          type,
+          title,
+          content,
+          project,
+          tags,
+        });
+
+        return {
+          content: [{
+            type: 'text',
+            text: `Superseded note:\n- Old (now superseded): ${result.oldPath}\n- New: ${result.newPath}\n\nBidirectional links created.`
+          }],
+        };
+      } catch (error) {
+        return {
+          content: [{ type: 'text', text: `Failed to supersede note: ${error}` }],
           isError: true,
         };
       }

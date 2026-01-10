@@ -37,18 +37,14 @@ async function main() {
   config.vault.memFolder = memFolder || '_claude-mem';
 
   // Ask about AI summarization
-  const enableSummarization = await ask('Enable AI-powered session summaries? (requires ANTHROPIC_API_KEY) [Y/n]: ');
+  const enableSummarization = await ask('Enable AI-powered session summaries? [Y/n]: ');
   config.summarization.enabled = !enableSummarization.toLowerCase().startsWith('n');
 
   if (config.summarization.enabled) {
-    const apiKeyEnv = await ask(`Environment variable for API key [ANTHROPIC_API_KEY]: `);
-    config.summarization.apiKeyEnvVar = apiKeyEnv || 'ANTHROPIC_API_KEY';
-
-    // Check if API key exists
-    if (!process.env[config.summarization.apiKeyEnvVar]) {
-      console.log(`\n⚠️  Warning: ${config.summarization.apiKeyEnvVar} not found in environment.`);
-      console.log('   AI summarization will be disabled until the API key is set.\n');
-    }
+    const model = await ask('Summarization model (sonnet/opus/haiku) [sonnet]: ');
+    config.summarization.model = model || 'sonnet';
+    console.log('\n💡 Note: Summarization uses Claude Code\'s existing subscription via Agent SDK.');
+    console.log('   No separate API key is required.\n');
   }
 
   // Save configuration
@@ -80,10 +76,6 @@ async function main() {
   console.log('2. Install this plugin in Claude Code:');
   console.log('   claude-code plugin install /path/to/cc-obsidian-mem');
   console.log('3. Start a new Claude Code session to begin capturing memories\n');
-
-  if (config.summarization.enabled && !process.env[config.summarization.apiKeyEnvVar]) {
-    console.log(`Remember to set ${config.summarization.apiKeyEnvVar} for AI summaries.\n`);
-  }
 
   rl.close();
 }

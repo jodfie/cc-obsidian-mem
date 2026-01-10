@@ -20,8 +20,7 @@ const DEFAULT_CONFIG: Config = {
   },
   summarization: {
     enabled: true,
-    model: 'claude-sonnet-4-5-20250514',
-    apiKeyEnvVar: 'ANTHROPIC_API_KEY',
+    model: 'sonnet', // Agent SDK uses simple names: 'sonnet', 'opus', 'haiku'
     sessionSummary: true,
     errorSummary: true,
   },

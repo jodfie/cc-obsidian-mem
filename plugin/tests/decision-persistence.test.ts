@@ -42,8 +42,7 @@ function createTestConfig(vaultPath: string, overrides?: Partial<Config>): Confi
     },
     summarization: {
       enabled: false,
-      model: 'claude-sonnet-4-5-20250514',
-      apiKeyEnvVar: 'ANTHROPIC_API_KEY',
+      model: 'sonnet',
       sessionSummary: false,
       errorSummary: false,
     },

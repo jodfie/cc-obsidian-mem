@@ -12,6 +12,7 @@ import {
   readStdinJson,
 } from './utils/helpers.js';
 import type { PostToolUseInput, Observation, ErrorData } from '../../src/shared/types.js';
+import { extractToolKnowledge } from '../../src/services/knowledge-extractor.js';
 import { sanitizeProjectName } from '../../src/shared/config.js';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -33,7 +34,22 @@ async function main() {
       return;
     }
 
-    // Filter based on configuration
+    // Handle knowledge-producing tools FIRST (before shouldCapture/isSignificantAction filters)
+    // These tools don't need to pass the observation filters
+    if (isKnowledgeTool(input.tool_name)) {
+      // Check if tool failed - still record as error
+      if (input.tool_response.isError) {
+        const errorObservation = buildErrorObservation(input);
+        addObservation(input.session_id, errorObservation);
+        await processError(errorObservation, session.project, session.id, config);
+      } else {
+        // Only extract knowledge from successful responses
+        await processKnowledgeTool(input, session.project, session.id, config);
+      }
+      return;
+    }
+
+    // Filter based on configuration (for file edits, bash commands)
     if (!shouldCapture(input.tool_name, config)) {
       return;
     }
@@ -64,6 +80,56 @@ async function main() {
   }
 }
 
+/**
+ * Check if a tool produces knowledge worth extracting
+ */
+function isKnowledgeTool(toolName: string): boolean {
+  return (
+    toolName === 'WebFetch' ||
+    toolName === 'WebSearch' ||
+    (toolName.includes('context7') && toolName.includes('query-docs'))
+  );
+}
+
+/**
+ * Process a knowledge-producing tool and extract/store knowledge
+ */
+async function processKnowledgeTool(
+  input: PostToolUseInput,
+  project: string,
+  sessionId: string,
+  config: ReturnType<typeof loadConfig>
+): Promise<void> {
+  // Skip if summarization is disabled
+  if (!config.summarization.enabled) return;
+
+  // Extract tool output text
+  const outputText = input.tool_response.content
+    .filter(c => c.type === 'text' && c.text)
+    .map(c => c.text)
+    .join('\n');
+
+  if (!outputText || outputText.length < 100) return;
+
+  try {
+    // Extract knowledge from tool output
+    const knowledge = await extractToolKnowledge(
+      input.tool_name,
+      input.tool_input,
+      outputText,
+      sessionId
+    );
+
+    if (knowledge) {
+      // Store knowledge in vault
+      const vault = new VaultManager(config.vault.path, config.vault.memFolder);
+      await vault.writeKnowledge(knowledge, project);
+    }
+  } catch (error) {
+    console.error('Failed to extract knowledge from tool:', error);
+  }
+}
+
 function shouldCapture(toolName: string, config: ReturnType<typeof loadConfig>): boolean {
   switch (toolName) {
     case 'Write':
@@ -72,7 +138,15 @@ function shouldCapture(toolName: string, config: ReturnType<typeof loadConfig>):
       return config.capture.fileEdits;
     case 'Bash':
       return config.capture.bashCommands;
+    // Knowledge-producing tools
+    case 'WebFetch':
+    case 'WebSearch':
+      return true; // Always capture web research
     default:
+      // Capture Context7 tools
+      if (toolName.includes('context7') && toolName.includes('query-docs')) {
+        return true;
+      }
       return false;
   }
 }
@@ -130,6 +204,20 @@ function buildObservation(input: PostToolUseInput, config: ReturnType<typeof loa
 }
 
 /**
+ * Build an error observation for failed knowledge tools
+ */
+function buildErrorObservation(input: PostToolUseInput): Observation {
+  return {
+    id: generateObservationId(),
+    timestamp: new Date().toISOString(),
+    tool: input.tool_name,
+    type: 'error',
+    isError: true,
+    data: extractErrorInfo(input.tool_name, input.tool_input, input.tool_response),
+  };
+}
+
+/**
  * Process an error observation - create/update error notes
  */
 async function processError(
@@ -176,8 +264,12 @@ async function createErrorNote(
   project: string,
   sessionId: string
 ): Promise<void> {
+  const config = loadConfig();
   const errorData = observation.data as ErrorData;
   const errorType = categorizeError(errorData);
+
+  // Parent link to errors category index (errors/errors.md)
+  const parentLink = `[[${config.vault.memFolder}/projects/${sanitizeProjectName(project)}/errors/errors]]`;
 
   const frontmatter = `---
 type: error
@@ -189,6 +281,7 @@ tags:
   - error
   - error/${errorType}
   - project/${sanitizeProjectName(project)}
+parent: "${parentLink}"
 error_type: ${errorData.type || 'unknown'}
 error_hash: ${path.basename(filePath, '.md')}
 first_seen: ${observation.timestamp}
@@ -344,7 +437,11 @@ async function createFileKnowledge(
   project: string,
   sessionId: string
 ): Promise<void> {
+  const config = loadConfig();
   const fileData = observation.data as { path: string; language?: string; changeType?: string };
+
+  // Parent link to files category index (files/files.md)
+  const parentLink = `[[${config.vault.memFolder}/projects/${sanitizeProjectName(project)}/files/files]]`;
 
   const frontmatter = `---
 type: file
@@ -356,6 +453,7 @@ tags:
   - file
   - lang/${fileData.language || 'unknown'}
   - project/${sanitizeProjectName(project)}
+parent: "${parentLink}"
 file_path: ${fileData.path}
 file_hash: ${path.basename(filePath, '.md')}
 language: ${fileData.language || 'unknown'}

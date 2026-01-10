@@ -28,6 +28,8 @@ export interface SessionMetadata {
   status: 'active' | 'completed' | 'stopped';
   summary?: string;
   lastUpdated: string;
+  /** Knowledge paths captured during pre-compact */
+  preCompactKnowledge?: string[];
 }
 
 /**
@@ -417,10 +419,198 @@ export function updateSessionSummary(sessionId: string, summary: string): boolea
 }
 
 /**
- * Clear session files (after persisting to vault)
- * Waits for any in-flight writes to complete before clearing
+ * Update pre-compact knowledge paths
+ * Called by pre-compact hook to store knowledge captured before compaction
  */
-export function clearSessionFile(sessionId: string): void {
+export function updatePreCompactKnowledge(sessionId: string, paths: string[]): boolean {
+  const metadata = readSessionMetadata(sessionId);
+
+  if (!metadata) {
+    return false;
+  }
+
+  // Append to existing paths if any
+  metadata.preCompactKnowledge = [
+    ...(metadata.preCompactKnowledge || []),
+    ...paths,
+  ];
+  writeSessionMetadata(metadata);
+  return true;
+}
+
+/**
+ * Get pre-compact knowledge paths for a session
+ * Waits briefly for any pending background jobs to complete
+ */
+export function getPreCompactKnowledge(sessionId: string, maxWaitMs: number = 3000): string[] {
+  const pendingPath = getPendingFilePath(sessionId);
+  const startTime = Date.now();
+
+  // Wait for all pending background jobs to complete (counter reaches 0)
+  while (Date.now() - startTime < maxWaitMs) {
+    const count = getPendingJobCount(pendingPath);
+    if (count <= 0) break;
+
+    // Short sleep to avoid busy-waiting
+    const end = Date.now() + 100;
+    while (Date.now() < end) {
+      // Busy wait (sync)
+    }
+  }
+
+  const metadata = readSessionMetadata(sessionId);
+  return metadata?.preCompactKnowledge || [];
+}
+
+/**
+ * Get the path to a session's pending background job counter file
+ */
+function getPendingFilePath(sessionId: string): string {
+  return path.join(getSessionsDir(), `${safeSessionFilename(sessionId)}.pending`);
+}
+
+/**
+ * Get the path to pending job lock file
+ */
+function getPendingLockPath(sessionId: string): string {
+  return path.join(getSessionsDir(), `${safeSessionFilename(sessionId)}.pending.lock`);
+}
+
+/**
+ * Acquire lock for pending counter operations
+ */
+function acquirePendingLock(sessionId: string): boolean {
+  ensureSessionsDir();
+  const lockPath = getPendingLockPath(sessionId);
+  const startTime = Date.now();
+
+  while (Date.now() - startTime < LOCK_TIMEOUT_MS) {
+    try {
+      const fd = fs.openSync(lockPath, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY);
+      fs.writeSync(fd, `${process.pid}\n${Date.now()}`);
+      fs.closeSync(fd);
+      return true;
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+        // Check for stale lock
+        try {
+          const stat = fs.statSync(lockPath);
+          if (Date.now() - stat.mtimeMs > LOCK_TIMEOUT_MS) {
+            fs.unlinkSync(lockPath);
+            continue;
+          }
+        } catch {
+          continue;
+        }
+        // Wait and retry
+        const end = Date.now() + LOCK_RETRY_MS;
+        while (Date.now() < end) { /* busy wait */ }
+        continue;
+      }
+      throw err;
+    }
+  }
+  return false;
+}
+
+/**
+ * Release pending counter lock
+ */
+function releasePendingLock(sessionId: string): void {
+  const lockPath = getPendingLockPath(sessionId);
+  try {
+    fs.unlinkSync(lockPath);
+  } catch {
+    // Ignore
+  }
+}
+
+/**
+ * Get the current pending job count (0 if file doesn't exist or is invalid)
+ * Must be called while holding the lock
+ */
+function getPendingJobCount(pendingPath: string): number {
+  try {
+    if (!fs.existsSync(pendingPath)) return 0;
+    const content = fs.readFileSync(pendingPath, 'utf-8').trim();
+    const count = parseInt(content, 10);
+    return isNaN(count) ? 0 : count;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Mark that a background job is starting for this session
+ * Uses a counter with locking to handle multiple concurrent jobs
+ */
+export function markBackgroundJobStarted(sessionId: string): void {
+  ensureSessionsDir();
+  const pendingPath = getPendingFilePath(sessionId);
+
+  const gotLock = acquirePendingLock(sessionId);
+  if (!gotLock) {
+    console.warn(`markBackgroundJobStarted: Could not acquire lock for ${sessionId}, skipping`);
+    return; // Don't update without lock - could corrupt counter
+  }
+
+  try {
+    const currentCount = getPendingJobCount(pendingPath);
+    fs.writeFileSync(pendingPath, `${currentCount + 1}`);
+  } finally {
+    releasePendingLock(sessionId);
+  }
+}
+
+/**
+ * Mark that a background job has completed for this session
+ * Decrements the counter; removes file when counter reaches 0
+ */
+export function markBackgroundJobCompleted(sessionId: string): void {
+  const pendingPath = getPendingFilePath(sessionId);
+
+  const gotLock = acquirePendingLock(sessionId);
+  if (!gotLock) {
+    console.warn(`markBackgroundJobCompleted: Could not acquire lock for ${sessionId}, skipping`);
+    return; // Don't update without lock - could corrupt counter
+  }
+
+  try {
+    const currentCount = getPendingJobCount(pendingPath);
+    if (currentCount <= 1) {
+      // Last job done, remove file
+      if (fs.existsSync(pendingPath)) {
+        fs.unlinkSync(pendingPath);
+      }
+    } else {
+      // Decrement counter
+      fs.writeFileSync(pendingPath, `${currentCount - 1}`);
+    }
+  } catch {
+    // Ignore errors
+  } finally {
+    releasePendingLock(sessionId);
+  }
+}
+
+/**
+ * Clear session files (after persisting to vault)
+ * Waits for pending background jobs to complete before clearing
+ */
+export function clearSessionFile(sessionId: string, maxWaitMs: number = 5000): void {
+  // Wait for pending background jobs to complete before clearing
+  const pendingPath = getPendingFilePath(sessionId);
+  const startTime = Date.now();
+
+  while (Date.now() - startTime < maxWaitMs) {
+    const count = getPendingJobCount(pendingPath);
+    if (count <= 0) break;
+
+    // Short sleep to avoid busy-waiting
+    const end = Date.now() + 100;
+    while (Date.now() < end) { /* busy wait */ }
+  }
+
   // Acquire lock to ensure no writes are in progress
   // If we can't get the lock after timeout, proceed anyway with warning
   const gotLock = acquireLock(sessionId);
@@ -432,9 +622,11 @@ export function clearSessionFile(sessionId: string): void {
     const metaPath = getSessionFilePath(sessionId);
     const obsPath = getObservationsFilePath(sessionId);
     const lockPath = getLockFilePath(sessionId);
+    const pendingLockPath = getPendingLockPath(sessionId);
 
-    // Delete metadata and observations files
-    for (const filePath of [metaPath, obsPath]) {
+    // Delete metadata, observations, pending files and pending lock
+    // Note: pendingPath is cleared separately after waiting
+    for (const filePath of [metaPath, obsPath, pendingPath, pendingLockPath]) {
       try {
         if (fs.existsSync(filePath)) {
           fs.unlinkSync(filePath);
