@@ -447,8 +447,9 @@ export function getPreCompactKnowledge(sessionId: string, maxWaitMs: number = 30
   const startTime = Date.now();
 
   // Wait for all pending background jobs to complete (counter reaches 0)
+  // Use conservative mode: treat read errors as "still pending" to avoid race
   while (Date.now() - startTime < maxWaitMs) {
-    const count = getPendingJobCount(pendingPath);
+    const count = getPendingJobCount(pendingPath, true);
     if (count <= 0) break;
 
     // Short sleep to avoid busy-waiting
@@ -526,17 +527,22 @@ function releasePendingLock(sessionId: string): void {
 }
 
 /**
- * Get the current pending job count (0 if file doesn't exist or is invalid)
- * Must be called while holding the lock
+ * Read the pending job count from file
+ * @param conservative If true, returns 1 on read errors (assume pending). Default false for backward compat.
  */
-function getPendingJobCount(pendingPath: string): number {
+function getPendingJobCount(pendingPath: string, conservative: boolean = false): number {
   try {
     if (!fs.existsSync(pendingPath)) return 0;
     const content = fs.readFileSync(pendingPath, 'utf-8').trim();
     const count = parseInt(content, 10);
-    return isNaN(count) ? 0 : count;
+    if (isNaN(count)) {
+      // Invalid read - could be partial write in progress
+      return conservative ? 1 : 0;
+    }
+    return count;
   } catch {
-    return 0;
+    // Read error - could be write in progress
+    return conservative ? 1 : 0;
   }
 }
 
@@ -599,11 +605,12 @@ export function markBackgroundJobCompleted(sessionId: string): void {
  */
 export function clearSessionFile(sessionId: string, maxWaitMs: number = 5000): void {
   // Wait for pending background jobs to complete before clearing
+  // Use conservative mode: treat read errors as "still pending" to avoid race
   const pendingPath = getPendingFilePath(sessionId);
   const startTime = Date.now();
 
   while (Date.now() - startTime < maxWaitMs) {
-    const count = getPendingJobCount(pendingPath);
+    const count = getPendingJobCount(pendingPath, true);
     if (count <= 0) break;
 
     // Short sleep to avoid busy-waiting
