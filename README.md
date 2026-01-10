@@ -17,11 +17,11 @@ Obsidian-based persistent memory system for Claude Code. Automatically captures 
 ┌──────────────┐     ┌─────────────┐     ┌────────────────┐
 │ Claude Code  │◄───►│ MCP Server  │◄───►│ Obsidian Vault │
 └──────┬───────┘     └─────────────┘     └────────────────┘
-       │                    ▲
-       ▼                    │
+       │
+       ▼
 ┌──────────────┐     ┌─────────────┐
-│    Hooks     │────►│   Worker    │
-│ (Lifecycle)  │     │  (HTTP API) │
+│    Hooks     │────►│Session Store│
+│ (Lifecycle)  │     │ (File-based)│
 └──────────────┘     └─────────────┘
 ```
 
@@ -31,9 +31,19 @@ Obsidian-based persistent memory system for Claude Code. Automatically captures 
 
 - [Bun](https://bun.sh/) runtime
 - [Obsidian](https://obsidian.md/) (with Dataview plugin recommended)
-- Claude Code
+- Claude Code CLI
 
-### Setup
+### Option 1: Install from GitHub (Recommended)
+
+```bash
+# Add the marketplace
+/plugin marketplace add z-m-huang/cc-obsidian-mem
+
+# Install the plugin
+/plugin install cc-obsidian-mem
+```
+
+### Option 2: Install from Local Clone
 
 1. Clone this repository:
    ```bash
@@ -43,22 +53,25 @@ Obsidian-based persistent memory system for Claude Code. Automatically captures 
 
 2. Install dependencies:
    ```bash
-   bun install
+   cd plugin && bun install
    ```
 
-3. Run the setup wizard:
-   ```bash
-   bun run setup
+3. Add as local marketplace in Claude Code:
+   ```
+   /plugin marketplace add /path/to/cc-obsidian-mem
+   /plugin install cc-obsidian-mem
    ```
 
-4. Install as a Claude Code plugin:
-   ```bash
-   claude-code plugin install /path/to/cc-obsidian-mem
-   ```
+4. Restart Claude Code to load the plugin
 
-## Configuration
+### Setup
 
-Configuration is stored at `~/.cc-obsidian-mem/config.json`:
+Run the setup wizard to configure your vault:
+```bash
+cd plugin && bun run setup
+```
+
+Or manually create `~/.cc-obsidian-mem/config.json`:
 
 ```json
 {
@@ -66,29 +79,29 @@ Configuration is stored at `~/.cc-obsidian-mem/config.json`:
     "path": "/path/to/your/obsidian/vault",
     "memFolder": "_claude-mem"
   },
-  "worker": {
-    "port": 37781,
-    "autoStart": true
-  },
   "capture": {
     "fileEdits": true,
     "bashCommands": true,
-    "errors": true,
-    "decisions": true,
     "bashOutput": {
       "enabled": true,
       "maxLength": 5000
-    }
+    },
+    "errors": true,
+    "decisions": true
   },
   "summarization": {
     "enabled": true,
     "model": "claude-sonnet-4-5-20250514",
-    "apiKeyEnvVar": "ANTHROPIC_API_KEY"
+    "apiKeyEnvVar": "ANTHROPIC_API_KEY",
+    "sessionSummary": true,
+    "errorSummary": true
   },
   "contextInjection": {
     "enabled": true,
     "maxTokens": 4000,
-    "includeRecentSessions": 3
+    "includeRecentSessions": 3,
+    "includeRelatedErrors": true,
+    "includeProjectPatterns": true
   }
 }
 ```
@@ -167,37 +180,52 @@ vault/
 
 ## Development
 
-### Running the worker service manually:
-```bash
-bun run dev:worker
+### Project Structure
+
+```
+cc-obsidian-mem/
+├── .claude-plugin/
+│   └── marketplace.json     # Marketplace manifest
+├── plugin/
+│   ├── .claude-plugin/
+│   │   └── plugin.json      # Plugin manifest
+│   ├── .mcp.json            # MCP server config
+│   ├── hooks/
+│   │   ├── hooks.json       # Hook definitions
+│   │   └── scripts/         # Hook scripts
+│   ├── skills/              # Skill definitions
+│   └── src/
+│       ├── mcp-server/      # MCP server
+│       └── shared/          # Shared utilities
 ```
 
-### Running the MCP server manually:
+### Running Tests
 ```bash
-bun run dev:mcp
+cd plugin && bun test
 ```
 
-### Building:
+### Building
 ```bash
-bun run build
+cd plugin && bun run build
 ```
 
 ## Troubleshooting
 
-### Worker not starting
-1. Check if port 37781 is available
-2. Try running manually: `bun run src/worker/index.ts`
-3. Check logs for errors
-
 ### No data being captured
-1. Verify hooks are installed in `.claude/hooks.json`
-2. Check vault path is correct and writable
-3. Ensure worker is running: `curl http://localhost:37781/health`
+1. Restart Claude Code after installing the plugin
+2. Check that `~/.cc-obsidian-mem/config.json` exists with correct vault path
+3. Verify vault path is writable
+4. Check `~/.cc-obsidian-mem/sessions/` for session files
 
 ### AI summaries not working
-1. Verify `ANTHROPIC_API_KEY` is set
+1. Verify `ANTHROPIC_API_KEY` environment variable is set
 2. Check `summarization.enabled` is `true` in config
 3. Ensure API key has access to the configured model
+
+### Plugin not loading
+1. Run `/plugin` to verify the plugin is installed
+2. Check plugin validation: `claude plugin validate /path/to/cc-obsidian-mem`
+3. Look for errors in Claude Code debug mode: `claude --debug`
 
 ## License
 

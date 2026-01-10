@@ -1,0 +1,17 @@
+{
+  "name": "cc-obsidian-mem",
+  "version": "0.1.0",
+  "description": "Obsidian-based persistent memory system for Claude Code - captures session activity into Obsidian vault",
+  "author": {
+    "name": "Mark Huang"
+  },
+  "repository": "https://github.com/Z-M-Huang/cc-obsidian-mem",
+  "license": "MIT",
+  "keywords": [
+    "memory",
+    "obsidian",
+    "knowledge-base",
+    "context",
+    "persistence"
+  ]
+}
