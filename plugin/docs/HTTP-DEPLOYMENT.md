@@ -1,15 +1,17 @@
 # HTTP/SSE Deployment Guide
 
-This guide covers deploying the cc-obsidian-mem MCP server as an HTTP/SSE service with Traefik reverse proxy.
+This guide covers deploying the cc-obsidian-mem MCP server as an HTTP/SSE service with Traefik reverse proxy and Cloudflare Access OAuth 2.0 authentication.
 
 ## Overview
 
-The HTTP server supports two transport protocols:
+The HTTP server supports:
 
-| Transport | Endpoint | Status | Use Case |
-|-----------|----------|--------|----------|
-| **Streamable HTTP** | `/mcp` | Recommended | Claude.ai, Claude Code, modern clients |
-| **HTTP+SSE** | `/sse` + `/messages` | Deprecated | Legacy client compatibility |
+| Feature | Description |
+|---------|-------------|
+| **Streamable HTTP** | Modern MCP transport (recommended) |
+| **Legacy SSE** | Backwards compatibility |
+| **Cloudflare Access OAuth 2.0** | Enterprise authentication via RFC 9728 |
+| **Bearer Token** | Simple token authentication |
 
 ## Quick Start
 
@@ -34,8 +36,11 @@ VAULT_PATH=/path/to/your/obsidian/vault
 # Domain for Traefik routing
 DOMAIN=obsidian-mem.yourdomain.com
 
-# Generate a secure bearer token
-BEARER_TOKEN=$(openssl rand -base64 32)
+# Public URL (for OAuth metadata)
+RESOURCE_URL=https://obsidian-mem.yourdomain.com
+
+# Authentication mode: 'bearer', 'cloudflare', or 'both'
+AUTH_MODE=both
 ```
 
 ### 3. Deploy with Docker Compose
@@ -48,48 +53,122 @@ docker compose up -d
 docker compose logs -f
 ```
 
-## Traefik Integration
+## Authentication Modes
 
-### Prerequisites
+### Bearer Token (Simple)
 
-- Traefik running with Docker provider
-- External network named `traefik_proxy`
-- Certificate resolver configured (e.g., `letsencrypt`)
-
-### Create Traefik Network (if not exists)
+For simple deployments or API access:
 
 ```bash
-docker network create traefik_proxy
+AUTH_MODE=bearer
+BEARER_TOKEN=$(openssl rand -base64 32)
 ```
 
-### Traefik Labels Explained
+### Cloudflare Access (OAuth 2.0)
 
-The docker-compose.yml includes these Traefik labels:
+For enterprise authentication with Zero Trust:
 
-```yaml
-labels:
-  # Enable Traefik for this container
-  - "traefik.enable=true"
-
-  # HTTP Router - route requests to this service
-  - "traefik.http.routers.obsidian-mem.rule=Host(`obsidian-mem.example.com`)"
-  - "traefik.http.routers.obsidian-mem.entrypoints=websecure"
-  - "traefik.http.routers.obsidian-mem.tls=true"
-  - "traefik.http.routers.obsidian-mem.tls.certresolver=letsencrypt"
-
-  # Service - which port to route to
-  - "traefik.http.services.obsidian-mem.loadbalancer.server.port=8080"
-
-  # CORS middleware
-  - "traefik.http.middlewares.obsidian-mem-cors.headers.accesscontrolallowmethods=GET,POST,DELETE,OPTIONS"
-  - "traefik.http.middlewares.obsidian-mem-cors.headers.accesscontrolallowheaders=Content-Type,Authorization,Mcp-Session-Id"
+```bash
+AUTH_MODE=cloudflare
+CF_ACCESS_TEAM=your-team-name
+CF_ACCESS_AUD=your-application-audience-tag
 ```
+
+### Both (Recommended)
+
+Accept either authentication method:
+
+```bash
+AUTH_MODE=both
+BEARER_TOKEN=your-token
+CF_ACCESS_TEAM=your-team-name
+CF_ACCESS_AUD=your-application-audience-tag
+```
+
+## Cloudflare Access Setup
+
+### Step 1: Create Access Application
+
+1. Go to [Cloudflare Zero Trust Dashboard](https://one.dash.cloudflare.com/)
+2. Navigate to **Access → Applications → Add an application**
+3. Select **Self-hosted**
+4. Configure:
+   - **Application name**: Obsidian Memory MCP
+   - **Session duration**: 24 hours
+   - **Application domain**: `obsidian-mem.yourdomain.com`
+
+### Step 2: Configure Policies
+
+1. Add a policy for allowed users:
+   - **Policy name**: Allow Team
+   - **Action**: Allow
+   - **Include**: Emails ending in `@yourdomain.com`
+
+2. (Optional) Add bypass for monitoring:
+   - **Policy name**: Uptime Kuma Bypass
+   - **Action**: Bypass
+   - **Include**: IP range `your-monitoring-server-ip/32`
+   - **Important**: Place bypass policy ABOVE allow policy
+
+### Step 3: Get Configuration Values
+
+1. **Application Audience (AUD) Tag**:
+   - Click on your application
+   - Find "Application Audience (AUD) Tag" in Overview
+   - Copy to `CF_ACCESS_AUD`
+
+2. **Team Name**:
+   - Go to Settings → Custom Pages
+   - Your team domain is: `https://[team-name].cloudflareaccess.com`
+   - Copy `[team-name]` to `CF_ACCESS_TEAM`
+
+### Step 4: Verify Setup
+
+```bash
+# Test OAuth metadata endpoint
+curl https://obsidian-mem.yourdomain.com/.well-known/oauth-protected-resource
+
+# Should return:
+{
+  "resource": "https://obsidian-mem.yourdomain.com",
+  "authorization_servers": ["https://your-team.cloudflareaccess.com"],
+  "bearer_methods_supported": ["header"],
+  "scopes_supported": ["mcp:read", "mcp:write", "mcp:tools"],
+  "mcp_protocol_version": "2025-03-26",
+  "resource_type": "mcp-server"
+}
+```
+
+## Endpoints
+
+| Endpoint | Method | Auth Required | Description |
+|----------|--------|---------------|-------------|
+| `/.well-known/oauth-protected-resource` | GET | No | RFC 9728 OAuth metadata |
+| `/health` | GET | No | Health check |
+| `/mcp` | GET, POST, DELETE | Yes | Streamable HTTP transport |
+| `/sse` | GET | Yes | Legacy SSE connection |
+| `/messages` | POST | Yes | Legacy message endpoint |
 
 ## Claude Integration
 
-### Claude.ai (Web)
+### Claude.ai (Web) with Cloudflare Access
 
-Add to your Claude.ai MCP configuration:
+When using Cloudflare Access, authentication happens at the Cloudflare layer. Configure Claude.ai with just the URL:
+
+```json
+{
+  "mcpServers": {
+    "obsidian-mem": {
+      "transport": "http",
+      "url": "https://obsidian-mem.yourdomain.com/mcp"
+    }
+  }
+}
+```
+
+**Note**: You'll be redirected to Cloudflare Access login when first connecting.
+
+### Claude.ai (Web) with Bearer Token
 
 ```json
 {
@@ -131,45 +210,53 @@ claude mcp add obsidian-mem https://obsidian-mem.yourdomain.com/mcp \
   --bearer-token YOUR_TOKEN_HERE
 ```
 
-## Endpoints
+## Traefik Integration
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/health` | GET | Health check (no auth required) |
-| `/mcp` | GET, POST, DELETE | Streamable HTTP transport |
-| `/sse` | GET | Legacy SSE connection (deprecated) |
-| `/messages` | POST | Legacy message endpoint (deprecated) |
+### Prerequisites
 
-## Health Check
+- Traefik running with Docker provider
+- External network named `traefik_proxy`
+- Certificate resolver configured (e.g., `letsencrypt`)
+
+### Create Traefik Network
 
 ```bash
-curl https://obsidian-mem.yourdomain.com/health
+docker network create traefik_proxy
 ```
 
-Response:
-```json
-{
-  "status": "healthy",
-  "name": "obsidian-mem",
-  "version": "0.3.0",
-  "timestamp": "2026-01-11T00:00:00.000Z"
-}
+### Traefik Labels
+
+The docker-compose.yml includes:
+
+```yaml
+labels:
+  - "traefik.enable=true"
+  - "traefik.http.routers.obsidian-mem.rule=Host(`obsidian-mem.example.com`)"
+  - "traefik.http.routers.obsidian-mem.entrypoints=websecure"
+  - "traefik.http.routers.obsidian-mem.tls.certresolver=letsencrypt"
+  - "traefik.http.services.obsidian-mem.loadbalancer.server.port=8080"
 ```
 
 ## Security
 
-### Bearer Token Authentication
+### RFC 9728 Compliance
 
-All endpoints except `/health` require a valid bearer token:
+The server implements RFC 9728 (OAuth Protected Resource Metadata):
 
-```bash
-curl -H "Authorization: Bearer YOUR_TOKEN" \
-  https://obsidian-mem.yourdomain.com/mcp
-```
+- `/.well-known/oauth-protected-resource` endpoint
+- `WWW-Authenticate` header with resource metadata link
+- Proper 401 responses for unauthorized requests
 
-### CORS
+### Cloudflare Access JWT Validation
 
-The server includes CORS headers for cross-origin requests. Configure allowed origins via:
+When using Cloudflare Access:
+
+1. Cloudflare adds `CF-Access-JWT-Assertion` header
+2. Server validates JWT against Cloudflare's public keys
+3. JWT contains user identity (email, etc.)
+4. Automatic key rotation via JWKS endpoint
+
+### CORS Configuration
 
 ```bash
 ALLOWED_ORIGINS=https://claude.ai,https://your-app.com
@@ -177,23 +264,31 @@ ALLOWED_ORIGINS=https://claude.ai,https://your-app.com
 
 ### TLS/HTTPS
 
-Always use HTTPS in production. Traefik handles TLS termination with Let's Encrypt certificates.
+Always use HTTPS in production:
+- Traefik handles TLS termination
+- Let's Encrypt for automatic certificates
+- Cloudflare provides additional DDoS protection
 
 ## Monitoring
 
-### Uptime Kuma
+### Health Check
 
-Add a monitor with these settings:
+```bash
+curl https://obsidian-mem.yourdomain.com/health
 
-```yaml
-Monitor Type: HTTP(s)
-URL: https://obsidian-mem.yourdomain.com/health
-Method: GET
-Expected Status: 200
-Interval: 60 seconds
+# Response:
+{
+  "status": "healthy",
+  "name": "obsidian-mem",
+  "version": "0.3.0",
+  "timestamp": "2026-01-11T00:00:00.000Z",
+  "auth_mode": "both"
+}
 ```
 
-### Docker Labels for Uptime Kuma Auto-Discovery
+### Uptime Kuma
+
+Docker labels auto-configure Uptime Kuma:
 
 ```yaml
 labels:
@@ -202,61 +297,62 @@ labels:
   - kuma.obsidian-mem.http.interval=60
 ```
 
+**Important**: Add IP bypass in Cloudflare Access for monitoring server.
+
 ## Troubleshooting
 
-### Container won't start
+### Authentication Failures
 
 ```bash
-# Check logs
-docker compose logs obsidian-mem
+# Check OAuth metadata
+curl -v https://obsidian-mem.yourdomain.com/.well-known/oauth-protected-resource
 
-# Verify vault path exists
-ls -la $VAULT_PATH
+# Test with bearer token
+curl -H "Authorization: Bearer $TOKEN" https://obsidian-mem.yourdomain.com/health
+
+# Check Cloudflare Access configuration
+curl -v https://your-team.cloudflareaccess.com/cdn-cgi/access/certs
 ```
 
-### Authentication fails
+### CORS Issues
 
-```bash
-# Test with curl
-curl -v -H "Authorization: Bearer $BEARER_TOKEN" \
-  https://obsidian-mem.yourdomain.com/health
-```
-
-### CORS issues
-
-Ensure your origin is in `ALLOWED_ORIGINS`:
+Ensure origin is in `ALLOWED_ORIGINS` and `CF-Access-JWT-Assertion` header is allowed:
 
 ```bash
 ALLOWED_ORIGINS=https://claude.ai,https://your-custom-origin.com
 ```
 
-### Session issues
+### Container Issues
 
-The server maintains session state. If sessions expire unexpectedly:
+```bash
+# Check logs
+docker compose logs obsidian-mem
 
-1. Check container memory limits
-2. Verify the container hasn't restarted
-3. Check logs for session cleanup messages
+# Verify environment
+docker compose exec obsidian-mem env | grep -E "(AUTH|CF_)"
+
+# Restart
+docker compose restart obsidian-mem
+```
 
 ## Local Development
 
-### Run without Docker
+### Run Without Docker
 
 ```bash
 cd plugin
-
-# Install dependencies
 bun install
 
 # Set environment variables
+export AUTH_MODE=bearer
 export BEARER_TOKEN=dev-token
 export CC_OBSIDIAN_MEM_VAULT_PATH=/path/to/vault
 
-# Run in development mode
+# Run in development
 bun run dev:http
 ```
 
-### Build for production
+### Build for Production
 
 ```bash
 bun run build:http
@@ -269,10 +365,28 @@ bun run start:http
 |----------|----------|---------|-------------|
 | `VAULT_PATH` | Yes | - | Host path to Obsidian vault |
 | `DOMAIN` | Yes | - | Public domain for Traefik |
-| `BEARER_TOKEN` | Recommended | - | Authentication token |
+| `RESOURCE_URL` | Recommended | - | Public URL for OAuth metadata |
+| `AUTH_MODE` | No | `bearer` | `bearer`, `cloudflare`, or `both` |
+| `BEARER_TOKEN` | Conditional | - | Required if AUTH_MODE includes bearer |
+| `CF_ACCESS_TEAM` | Conditional | - | Required if AUTH_MODE includes cloudflare |
+| `CF_ACCESS_AUD` | Conditional | - | Required if AUTH_MODE includes cloudflare |
 | `MEM_FOLDER` | No | `_claude-mem` | Folder within vault |
 | `ALLOWED_ORIGINS` | No | `https://claude.ai` | CORS allowed origins |
 | `CERT_RESOLVER` | No | `letsencrypt` | Traefik cert resolver |
 | `TZ` | No | `America/New_York` | Container timezone |
-| `MCP_PORT` | No | `8080` | Internal server port |
-| `MCP_HOST` | No | `0.0.0.0` | Internal bind address |
+
+## Architecture
+
+```
+User
+  ↓
+Cloudflare Edge (DDoS protection, TLS)
+  ↓
+Cloudflare Access (OAuth 2.0 authentication)
+  ↓
+Traefik (Reverse proxy, TLS termination)
+  ↓
+obsidian-mem container (MCP server)
+  ↓
+Obsidian Vault (mounted volume)
+```

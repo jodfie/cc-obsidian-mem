@@ -3,11 +3,14 @@
 /**
  * HTTP/SSE MCP Server for cc-obsidian-mem
  *
- * Supports both:
+ * Supports:
  * 1. Streamable HTTP transport (recommended, protocol version 2025-03-26+)
  * 2. Legacy HTTP+SSE transport (deprecated, for backwards compatibility)
+ * 3. Cloudflare Access OAuth 2.0 authentication (RFC 9728)
+ * 4. Simple Bearer token authentication
  *
  * Endpoints:
+ * - /.well-known/oauth-protected-resource: RFC 9728 Protected Resource Metadata
  * - /mcp: Streamable HTTP (GET, POST, DELETE)
  * - /sse: Legacy SSE endpoint (GET)
  * - /messages: Legacy message endpoint (POST)
@@ -20,6 +23,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
+import { createRemoteJWKSet, jwtVerify, JWTPayload } from 'jose';
 import * as z from 'zod';
 import { VaultManager } from './utils/vault.js';
 import { loadConfig } from '../shared/config.js';
@@ -28,11 +32,27 @@ import type { SearchResult, ProjectContext, Note } from '../shared/types.js';
 type TextContent = { type: 'text'; text: string };
 type ToolResult = { content: TextContent[]; isError?: boolean };
 
+// ===========================================
 // Configuration
+// ===========================================
 const PORT = parseInt(process.env.MCP_PORT || '8080', 10);
 const HOST = process.env.MCP_HOST || '0.0.0.0';
 const BEARER_TOKEN = process.env.BEARER_TOKEN || '';
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || 'https://claude.ai').split(',').map(s => s.trim());
+
+// OAuth/Cloudflare Access Configuration
+const RESOURCE_URL = process.env.RESOURCE_URL || ''; // e.g., https://obsidian-mem.yourdomain.com
+const CF_ACCESS_TEAM = process.env.CF_ACCESS_TEAM || ''; // e.g., your-team-name
+const CF_ACCESS_AUD = process.env.CF_ACCESS_AUD || ''; // Cloudflare Access Application Audience Tag
+const AUTH_MODE = process.env.AUTH_MODE || 'bearer'; // 'bearer', 'cloudflare', or 'both'
+
+// Cloudflare Access JWKS URL
+const CF_JWKS_URL = CF_ACCESS_TEAM
+  ? `https://${CF_ACCESS_TEAM}.cloudflareaccess.com/cdn-cgi/access/certs`
+  : '';
+
+// JWKS cache for Cloudflare Access
+let cfJWKS: ReturnType<typeof createRemoteJWKSet> | null = null;
 
 // Store active transports by session ID
 const transports: Record<string, StreamableHTTPServerTransport | SSEServerTransport> = {};
@@ -40,6 +60,48 @@ const transports: Record<string, StreamableHTTPServerTransport | SSEServerTransp
 // Initialize vault
 const config = loadConfig();
 const vault = new VaultManager(config.vault.path, config.vault.memFolder);
+
+// ===========================================
+// Cloudflare Access JWT Validation
+// ===========================================
+
+interface CloudflareAccessPayload extends JWTPayload {
+  email?: string;
+  identity_nonce?: string;
+  country?: string;
+}
+
+/**
+ * Validate Cloudflare Access JWT token
+ */
+async function validateCloudflareAccessToken(token: string): Promise<CloudflareAccessPayload | null> {
+  if (!CF_JWKS_URL || !CF_ACCESS_AUD) {
+    console.error('[Auth] Cloudflare Access not configured');
+    return null;
+  }
+
+  try {
+    // Initialize JWKS if not cached
+    if (!cfJWKS) {
+      cfJWKS = createRemoteJWKSet(new URL(CF_JWKS_URL));
+    }
+
+    const { payload } = await jwtVerify(token, cfJWKS, {
+      audience: CF_ACCESS_AUD,
+      issuer: `https://${CF_ACCESS_TEAM}.cloudflareaccess.com`,
+    });
+
+    console.log(`[Auth] Cloudflare Access: Validated token for ${(payload as CloudflareAccessPayload).email}`);
+    return payload as CloudflareAccessPayload;
+  } catch (error) {
+    console.error('[Auth] Cloudflare Access token validation failed:', error);
+    return null;
+  }
+}
+
+// ===========================================
+// MCP Server Setup
+// ===========================================
 
 /**
  * Create and configure the MCP server with all tools
@@ -304,7 +366,10 @@ function createMcpServer(): McpServer {
   return server;
 }
 
+// ===========================================
 // Formatting functions
+// ===========================================
+
 function formatSearchResults(results: SearchResult[]): string {
   if (results.length === 0) return 'No results found.';
 
@@ -354,43 +419,65 @@ function formatProjectContext(context: ProjectContext): string {
   return lines.join('\n');
 }
 
+// ===========================================
+// Middleware
+// ===========================================
+
 /**
- * Bearer token authentication middleware
+ * Build WWW-Authenticate header for 401 responses (RFC 9728)
  */
-function authMiddleware(req: Request, res: Response, next: NextFunction): void {
-  // Skip auth for health check
-  if (req.path === '/health') {
+function getWWWAuthenticateHeader(): string {
+  if (RESOURCE_URL && AUTH_MODE !== 'bearer') {
+    return `Bearer resource_metadata="${RESOURCE_URL}/.well-known/oauth-protected-resource"`;
+  }
+  return 'Bearer';
+}
+
+/**
+ * Authentication middleware supporting both Bearer token and Cloudflare Access
+ */
+async function authMiddleware(req: Request, res: Response, next: NextFunction): Promise<void> {
+  // Skip auth for health check and OAuth metadata endpoints
+  if (req.path === '/health' || req.path === '/.well-known/oauth-protected-resource') {
     next();
     return;
   }
 
-  // Skip auth if no token configured
-  if (!BEARER_TOKEN) {
+  // Skip auth if no authentication is configured
+  if (!BEARER_TOKEN && AUTH_MODE === 'bearer') {
     next();
     return;
   }
 
+  // Check for Cloudflare Access JWT (CF-Access-JWT-Assertion header)
+  const cfAccessToken = req.headers['cf-access-jwt-assertion'] as string | undefined;
+  if (cfAccessToken && (AUTH_MODE === 'cloudflare' || AUTH_MODE === 'both')) {
+    const payload = await validateCloudflareAccessToken(cfAccessToken);
+    if (payload) {
+      // Attach user info to request for logging/auditing
+      (req as any).cfAccessUser = payload;
+      next();
+      return;
+    }
+  }
+
+  // Check for Bearer token
   const authHeader = req.headers.authorization;
-  if (!authHeader) {
-    res.status(401).json({
-      jsonrpc: '2.0',
-      error: { code: -32001, message: 'Unauthorized: Missing Authorization header' },
-      id: null
-    });
-    return;
+  if (authHeader && (AUTH_MODE === 'bearer' || AUTH_MODE === 'both')) {
+    const [scheme, token] = authHeader.split(' ');
+    if (scheme?.toLowerCase() === 'bearer' && token === BEARER_TOKEN) {
+      next();
+      return;
+    }
   }
 
-  const [scheme, token] = authHeader.split(' ');
-  if (scheme?.toLowerCase() !== 'bearer' || token !== BEARER_TOKEN) {
-    res.status(401).json({
-      jsonrpc: '2.0',
-      error: { code: -32001, message: 'Unauthorized: Invalid token' },
-      id: null
-    });
-    return;
-  }
-
-  next();
+  // Authentication failed
+  res.setHeader('WWW-Authenticate', getWWWAuthenticateHeader());
+  res.status(401).json({
+    jsonrpc: '2.0',
+    error: { code: -32001, message: 'Unauthorized' },
+    id: null
+  });
 }
 
 /**
@@ -407,7 +494,7 @@ function corsMiddleware(req: Request, res: Response, next: NextFunction): void {
   }
 
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Mcp-Session-Id');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Mcp-Session-Id, CF-Access-JWT-Assertion');
   res.setHeader('Access-Control-Expose-Headers', 'Mcp-Session-Id');
   res.setHeader('Access-Control-Max-Age', '86400');
 
@@ -420,9 +507,10 @@ function corsMiddleware(req: Request, res: Response, next: NextFunction): void {
   next();
 }
 
-/**
- * Main function to start the server
- */
+// ===========================================
+// Main Server
+// ===========================================
+
 async function main(): Promise<void> {
   // Ensure vault structure exists
   await vault.ensureStructure();
@@ -432,15 +520,43 @@ async function main(): Promise<void> {
   // Middleware
   app.use(corsMiddleware);
   app.use(express.json());
+
+  // =============================================
+  // RFC 9728: OAuth Protected Resource Metadata
+  // =============================================
+  app.get('/.well-known/oauth-protected-resource', (_req: Request, res: Response) => {
+    const resourceUrl = RESOURCE_URL || `http://${HOST}:${PORT}`;
+    const authServers: string[] = [];
+
+    // Add Cloudflare Access as authorization server if configured
+    if (CF_ACCESS_TEAM) {
+      authServers.push(`https://${CF_ACCESS_TEAM}.cloudflareaccess.com`);
+    }
+
+    res.json({
+      resource: resourceUrl,
+      authorization_servers: authServers.length > 0 ? authServers : undefined,
+      bearer_methods_supported: ['header'],
+      scopes_supported: ['mcp:read', 'mcp:write', 'mcp:tools'],
+      resource_documentation: `${resourceUrl}/docs`,
+      mcp_protocol_version: '2025-03-26',
+      resource_type: 'mcp-server',
+      // Cloudflare Access specific
+      ...(CF_ACCESS_AUD && { cloudflare_access_aud: CF_ACCESS_AUD }),
+    });
+  });
+
+  // Apply auth middleware after OAuth metadata endpoint
   app.use(authMiddleware);
 
-  // Health check endpoint
+  // Health check endpoint (no auth required - handled by middleware)
   app.get('/health', (_req: Request, res: Response) => {
     res.json({
       status: 'healthy',
       name: 'obsidian-mem',
       version: '0.3.0',
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
+      auth_mode: AUTH_MODE,
     });
   });
 
@@ -569,12 +685,18 @@ Obsidian Memory MCP Server
 Listening on: http://${HOST}:${PORT}
 
 Endpoints:
+  GET  /.well-known/oauth-protected-resource - RFC 9728 OAuth Metadata
   GET  /health    - Health check
   ALL  /mcp       - Streamable HTTP (recommended)
   GET  /sse       - Legacy SSE (deprecated)
   POST /messages  - Legacy POST (deprecated)
 
-Auth: ${BEARER_TOKEN ? 'Bearer token required' : 'No authentication'}
+Authentication:
+  Mode: ${AUTH_MODE}
+  Bearer Token: ${BEARER_TOKEN ? 'Configured' : 'Not configured'}
+  Cloudflare Access: ${CF_ACCESS_TEAM ? `Team: ${CF_ACCESS_TEAM}` : 'Not configured'}
+  ${CF_ACCESS_AUD ? `Audience: ${CF_ACCESS_AUD.substring(0, 20)}...` : ''}
+
 CORS: ${ALLOWED_ORIGINS.join(', ')}
 Vault: ${config.vault.path}
 ==============================================
