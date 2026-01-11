@@ -25,7 +25,7 @@ async function main() {
 
   const server = new McpServer({
     name: "obsidian-mem",
-    version: "0.4.1",
+    version: "0.5.0",
   });
 
   // Tool: mem_search - Search the knowledge base
