@@ -73,7 +73,10 @@ The wizard will prompt you for your Obsidian vault path and create the config fi
   },
   "summarization": {
     "enabled": true,
-    "model": "sonnet"
+    "model": "sonnet",
+    "sessionSummary": true,
+    "errorSummary": true,
+    "timeout": 180000
   },
   "contextInjection": {
     "enabled": true,
@@ -106,19 +109,20 @@ You have access to a persistent memory system via MCP tools. Use it proactively.
 
 ### Available Tools
 
-| Tool | Use When |
-|------|----------|
-| `mem_search` | Looking for past decisions, errors, patterns, or context |
-| `mem_read` | Need full content of a specific note |
-| `mem_write` | Saving important decisions, patterns, or learnings |
-| `mem_supersede` | Updating/replacing outdated information |
-| `mem_project_context` | Starting work on a project (get recent context) |
-| `mem_list_projects` | Need to see all tracked projects |
-| `mem_generate_canvas` | Generate Obsidian canvas visualizations |
+| Tool                  | Use When                                                 |
+| --------------------- | -------------------------------------------------------- |
+| `mem_search`          | Looking for past decisions, errors, patterns, or context |
+| `mem_read`            | Need full content of a specific note                     |
+| `mem_write`           | Saving important decisions, patterns, or learnings       |
+| `mem_supersede`       | Updating/replacing outdated information                  |
+| `mem_project_context` | Starting work on a project (get recent context)          |
+| `mem_list_projects`   | Need to see all tracked projects                         |
+| `mem_generate_canvas` | Generate Obsidian canvas visualizations                  |
 
 ### When to Search Memory
 
 **Proactively search memory (`mem_search`) when:**
+
 - Starting work on a codebase - check for project context and recent decisions
 - Encountering an error - search for similar errors and their solutions
 - Making architectural decisions - look for related past decisions
@@ -126,6 +130,7 @@ You have access to a persistent memory system via MCP tools. Use it proactively.
 - Implementing a feature similar to past work
 
 **Example searches:**
+
 - `mem_search query="authentication" type="decision"` - Find auth-related decisions
 - `mem_search query="TypeError" type="error"` - Find past TypeScript errors
 - `mem_search query="database schema"` - Find DB-related knowledge
@@ -134,12 +139,14 @@ You have access to a persistent memory system via MCP tools. Use it proactively.
 ### When to Save to Memory
 
 **Save to memory (`mem_write`) when:**
+
 - Making significant architectural or technical decisions
 - Discovering important patterns or gotchas
 - Solving tricky bugs (save the solution)
 - Learning something project-specific that will be useful later
 
 **Use `mem_supersede` when:**
+
 - A previous decision is being replaced
 - Updating outdated documentation or patterns
 ```
@@ -153,6 +160,7 @@ You can also add this to your global `~/.claude/CLAUDE.md` to apply it to all pr
 ### Automatic Capture
 
 Once installed, the plugin automatically:
+
 - Tracks file edits, bash commands, and errors during sessions
 - Extracts knowledge from web searches and documentation lookups
 - Generates AI-powered knowledge extraction when you run `/compact` or end a session
@@ -161,6 +169,7 @@ Once installed, the plugin automatically:
 ### Skills (User Commands)
 
 #### `/mem-search` - Search your knowledge base
+
 ```
 /mem-search authentication error fix
 /mem-search database schema decisions
@@ -168,6 +177,7 @@ Once installed, the plugin automatically:
 ```
 
 #### `/mem-save` - Save knowledge explicitly
+
 ```
 /mem-save decision: We chose PostgreSQL for better JSON support
 /mem-save pattern: This regex validates email addresses
@@ -175,6 +185,7 @@ Once installed, the plugin automatically:
 ```
 
 #### `/mem-status` - Check system status
+
 ```
 /mem-status
 ```
@@ -183,15 +194,15 @@ Once installed, the plugin automatically:
 
 These tools are available to Claude during conversations:
 
-| Tool | Description |
-|------|-------------|
-| `mem_search` | Search notes by query, project, type, or tags |
-| `mem_read` | Read a specific note's content |
-| `mem_write` | Create or update notes |
-| `mem_supersede` | Create a new note that supersedes an existing one (bidirectional links) |
-| `mem_project_context` | Get context for a project |
-| `mem_list_projects` | List all tracked projects |
-| `mem_generate_canvas` | Generate canvas visualizations (dashboard, timeline, graph) |
+| Tool                  | Description                                                             |
+| --------------------- | ----------------------------------------------------------------------- |
+| `mem_search`          | Search notes by query, project, type, or tags                           |
+| `mem_read`            | Read a specific note's content                                          |
+| `mem_write`           | Create or update notes                                                  |
+| `mem_supersede`       | Create a new note that supersedes an existing one (bidirectional links) |
+| `mem_project_context` | Get context for a project                                               |
+| `mem_list_projects`   | List all tracked projects                                               |
+| `mem_generate_canvas` | Generate canvas visualizations (dashboard, timeline, graph)             |
 
 ---
 
@@ -211,13 +222,13 @@ These tools are available to Claude during conversations:
 
 ### Hooks
 
-| Hook | Purpose |
-|------|---------|
-| `SessionStart` | Initialize session tracking, inject project context, migrate pending files |
-| `UserPromptSubmit` | Track user prompts |
-| `PostToolUse` | Capture observations, extract knowledge from web tools |
-| `PreCompact` | Trigger background AI summarization before `/compact` |
-| `SessionEnd` | Generate canvas visualizations, cleanup session files |
+| Hook               | Purpose                                                                    |
+| ------------------ | -------------------------------------------------------------------------- |
+| `SessionStart`     | Initialize session tracking, inject project context, migrate pending files |
+| `UserPromptSubmit` | Track user prompts                                                         |
+| `PostToolUse`      | Capture observations, extract knowledge from web tools                     |
+| `PreCompact`       | Trigger background AI summarization before `/compact`                      |
+| `SessionEnd`       | Generate canvas visualizations, cleanup session files                      |
 
 ---
 
@@ -263,6 +274,7 @@ vault/
 ### Note Linking
 
 Notes follow a hierarchical linking structure for Obsidian graph navigation:
+
 - Individual notes link to their category index via `parent` frontmatter
 - Category indexes link to the project base
 - Superseded notes have bidirectional links (`superseded_by` ↔ `supersedes`)
