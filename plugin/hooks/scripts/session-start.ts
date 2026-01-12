@@ -7,7 +7,7 @@ import { loadConfig } from '../../src/shared/config.js';
 import { startSession } from '../../src/shared/session-store.js';
 import { VaultManager } from '../../src/mcp-server/utils/vault.js';
 import { getProjectInfo, readStdinJson } from './utils/helpers.js';
-import { createLogger } from '../../src/shared/logger.js';
+import { createLogger, logSessionIndex } from '../../src/shared/logger.js';
 import type { SessionStartInput } from '../../src/shared/types.js';
 
 async function main() {
@@ -27,6 +27,9 @@ async function main() {
     // Initialize session in file store
     startSession(input.session_id, project.name, input.cwd);
     logger.info(`Session initialized for project: ${project.name}`);
+
+    // Log session index to MCP log for easy lookup
+    logSessionIndex(input.session_id, project.name);
 
     // Ensure vault structure exists for this project
     const vault = new VaultManager(config.vault.path, config.vault.memFolder);

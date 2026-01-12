@@ -228,6 +228,29 @@ function getCircularReplacer() {
 }
 
 /**
+ * Log a session index entry to the MCP log for easy lookup
+ * This helps users find which session log file corresponds to which project
+ */
+export function logSessionIndex(sessionId: string, projectName: string): void {
+  try {
+    const config = loadConfig();
+    const logDir = config.logging?.logDir || os.tmpdir();
+    const actualLogDir = ensureLogDirectory(logDir);
+
+    const mcpLogFile = path.join(actualLogDir, 'cc-obsidian-mem-mcp.log');
+    const sessionLogFile = path.join(actualLogDir, `cc-obsidian-mem-${sanitizeSessionId(sessionId)}.log`);
+
+    const timestamp = new Date().toISOString();
+    const line = `[${timestamp}] [INDEX] Session ${sessionId} started for ${projectName} → ${sessionLogFile}\n`;
+
+    rotateLogIfNeeded(mcpLogFile);
+    fs.appendFileSync(mcpLogFile, line, { mode: 0o600 });
+  } catch (error) {
+    // Silently fail to match hook pattern
+  }
+}
+
+/**
  * Clean up old session log files (called from session-end hook)
  */
 export function cleanupOldLogs(maxAgeHours: number = 24): void {

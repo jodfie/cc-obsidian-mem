@@ -4,15 +4,18 @@ import { parseFrontmatter, stringifyFrontmatter, generateFrontmatter, mergeFront
 import type { Note, NoteFrontmatter, WriteNoteInput, NoteType, SearchResult, ProjectContext } from '../../shared/types.js';
 import { loadConfig, getMemFolderPath, getProjectPath, sanitizeProjectName } from '../../shared/config.js';
 import { PROJECTS_FOLDER, GLOBAL_FOLDER, TEMPLATES_FOLDER } from '../../shared/constants.js';
+import { createLogger, type Logger } from '../../shared/logger.js';
 
 export class VaultManager {
   private vaultPath: string;
   private memFolder: string;
+  private logger: Logger;
 
   constructor(vaultPath?: string, memFolder?: string) {
     const config = loadConfig();
     this.vaultPath = vaultPath || config.vault.path;
     this.memFolder = memFolder || config.vault.memFolder;
+    this.logger = createLogger('vault'); // Logs to MCP log (shared)
   }
 
   /**
@@ -41,6 +44,7 @@ export class VaultManager {
     for (const dir of dirs) {
       if (!fs.existsSync(dir)) {
         fs.mkdirSync(dir, { recursive: true });
+        this.logger.debug(`Created directory: ${dir}`);
       }
     }
   }
@@ -64,6 +68,7 @@ export class VaultManager {
     for (const dir of dirs) {
       if (!fs.existsSync(dir)) {
         fs.mkdirSync(dir, { recursive: true });
+        this.logger.debug(`Created project directory: ${dir}`);
       }
     }
 
@@ -74,6 +79,7 @@ export class VaultManager {
 
     if (fs.existsSync(oldIndexPath) && !fs.existsSync(newIndexPath)) {
       fs.renameSync(oldIndexPath, newIndexPath);
+      this.logger.info(`Migrated index: ${oldIndexPath} → ${newIndexPath}`);
     }
 
     // Create project index if it doesn't exist
@@ -178,6 +184,7 @@ SORT created DESC
 `;
 
     fs.writeFileSync(indexPath, frontmatter + content);
+    this.logger.info(`Created category index: ${indexPath}`);
   }
 
   /**
@@ -247,10 +254,9 @@ LIMIT 10
       tags: ['index', 'project-root', `project/${sanitizedName}`],
     });
 
-    fs.writeFileSync(
-      path.join(projectPath, `${sanitizedName}.md`),
-      stringifyFrontmatter(frontmatter, content)
-    );
+    const indexPath = path.join(projectPath, `${sanitizedName}.md`);
+    fs.writeFileSync(indexPath, stringifyFrontmatter(frontmatter, content));
+    this.logger.info(`Created project index: ${indexPath}`);
   }
 
   /**
@@ -292,6 +298,7 @@ LIMIT 10
     const dir = path.dirname(fullPath);
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
+      this.logger.debug(`Created directory: ${dir}`);
     }
 
     const exists = fs.existsSync(fullPath);
@@ -360,6 +367,10 @@ LIMIT 10
 
       fs.writeFileSync(fullPath, stringifyFrontmatter(frontmatter, input.content));
     }
+
+    // Log the file operation
+    const action = !exists ? 'Created' : (input.append ? 'Appended to' : 'Updated');
+    this.logger.info(`${action} note: ${fullPath}`, { type: input.type, title: input.title, project: input.project });
 
     return { path: notePath, created: !exists };
   }
@@ -462,8 +473,10 @@ LIMIT 10
       }
 
       fs.writeFileSync(fullOldPath, stringifyFrontmatter(frontmatter, updatedContent));
+      this.logger.info(`Marked as superseded: ${fullOldPath}`);
     }
 
+    this.logger.info(`Superseded note: ${oldNotePath} → ${newResult.path}`);
     return { oldPath: oldNotePath, newPath: newResult.path };
   }
 
@@ -526,6 +539,7 @@ LIMIT 10
     },
     projectName: string
   ): Promise<{ path: string; created: boolean }> {
+    this.logger.debug(`Writing knowledge: ${knowledge.title}`, { type: knowledge.type, project: projectName });
     await this.ensureProjectStructure(projectName);
 
     const date = new Date().toISOString().split('T')[0];
@@ -596,6 +610,7 @@ ${keyPointsSection}${sourceSection}
     }>,
     projectName: string
   ): Promise<string[]> {
+    this.logger.info(`Writing knowledge batch: ${items.length} items for ${projectName}`);
     const paths: string[] = [];
 
     for (const item of items) {
@@ -603,10 +618,11 @@ ${keyPointsSection}${sourceSection}
         const result = await this.writeKnowledge(item, projectName);
         paths.push(result.path);
       } catch (error) {
-        console.error(`Failed to write knowledge: ${item.title}`, error);
+        this.logger.error(`Failed to write knowledge: ${item.title}`, error instanceof Error ? error : undefined);
       }
     }
 
+    this.logger.info(`Knowledge batch complete: ${paths.length}/${items.length} written`);
     return paths;
   }
 
