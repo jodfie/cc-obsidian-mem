@@ -63,10 +63,10 @@ When releasing a new version, update the version number in **all four files**:
 
 | File                                | Field                | Example              |
 | ----------------------------------- | -------------------- | -------------------- |
-| `plugin/package.json`               | `version`            | `"version": "0.5.0"` |
-| `plugin/.claude-plugin/plugin.json` | `version`            | `"version": "0.5.0"` |
-| `.claude-plugin/marketplace.json`   | `plugins[0].version` | `"version": "0.5.0"` |
-| `plugin/src/mcp-server/index.ts`    | `version`            | `version: "0.5.0"`   |
+| `plugin/package.json`               | `version`            | `"version": "0.5.1"` |
+| `plugin/.claude-plugin/plugin.json` | `version`            | `"version": "0.5.1"` |
+| `.claude-plugin/marketplace.json`   | `plugins[0].version` | `"version": "0.5.1"` |
+| `plugin/src/mcp-server/index.ts`    | `version`            | `version: "0.5.1"`   |
 
 ### Project Structure
 
@@ -160,13 +160,14 @@ To enable canvas visualizations, add to `~/.cc-obsidian-mem/config.json`:
 }
 ```
 
-| Option | Values | Description |
-|--------|--------|-------------|
-| `enabled` | `true`/`false` | Enable canvas generation |
-| `autoGenerate` | `true`/`false` | Auto-generate when `mem_project_context` is called |
+| Option           | Values              | Description                                                   |
+| ---------------- | ------------------- | ------------------------------------------------------------- |
+| `enabled`        | `true`/`false`      | Enable canvas generation                                      |
+| `autoGenerate`   | `true`/`false`      | Auto-generate when `mem_project_context` is called            |
 | `updateStrategy` | `"always"`/`"skip"` | `always` = overwrite existing, `skip` = preserve manual edits |
 
 Canvas files are created in `_claude-mem/projects/{project}/canvases/`:
+
 - `dashboard.canvas` - Grid layout grouped by folder type (errors, decisions, patterns, etc.)
 - `timeline.canvas` - Decisions sorted chronologically
 - `graph.canvas` - Radial knowledge graph centered on project
