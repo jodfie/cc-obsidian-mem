@@ -33,6 +33,7 @@ export interface Config {
   };
   canvas?: CanvasConfig;
   logging?: LoggingConfig;
+  processing?: ProcessingConfig;
 }
 
 /**
@@ -58,6 +59,16 @@ export interface CanvasConfig {
 }
 
 /**
+ * Processing configuration for knowledge extraction
+ */
+export interface ProcessingConfig {
+  /** Knowledge extraction frequency */
+  frequency: 'compact-only' | 'periodic';
+  /** Interval in minutes for periodic extraction (default: 10) */
+  periodicInterval?: number;
+}
+
+/**
  * Session types
  */
 
@@ -76,6 +87,12 @@ export interface Session {
   errorsEncountered: number;
   /** Knowledge paths captured during pre-compact, to be linked at session end */
   preCompactKnowledge?: string[];
+  /** Exploration summary for this session */
+  exploration?: SessionExploration;
+  /** Topics covered in this session */
+  topics?: string[];
+  /** Session summary text */
+  sessionSummary?: string;
 }
 
 export interface Observation {
@@ -87,7 +104,7 @@ export interface Observation {
   data: FileEditData | CommandData | ErrorData | Record<string, unknown>;
 }
 
-export type ObservationType = 'file_edit' | 'command' | 'error' | 'decision' | 'other';
+export type ObservationType = 'file_edit' | 'command' | 'error' | 'decision' | 'exploration' | 'other';
 
 export interface FileEditData {
   path: string;
@@ -113,6 +130,25 @@ export interface ErrorData {
   line?: number;
   context?: string;
   resolution?: string;
+}
+
+/**
+ * Exploration data types for tracking codebase navigation
+ */
+
+export interface ExplorationData {
+  action: 'read' | 'search' | 'glob';
+  paths?: string[];           // Files read or matched (project-relative)
+  patterns?: string[];        // Search patterns used
+  query?: string;             // For Grep: the pattern
+  results_count?: number;     // Number of results
+}
+
+export interface SessionExploration {
+  files_read: string[];       // Unique file paths read
+  patterns_searched: string[];// Search patterns used
+  globs_matched: string[];    // Glob patterns used
+  exploration_count: number;  // Total exploration actions
 }
 
 /**

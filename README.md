@@ -5,9 +5,12 @@ Obsidian-based persistent memory system for Claude Code. Automatically captures 
 ## Features
 
 - **Automatic Capture**: Hooks automatically track file edits, commands, and errors
-- **AI Summaries**: Claude-powered knowledge extraction from conversations
+- **Exploration Tracking**: Captures codebase exploration (files read, search patterns used)
+- **AI Summaries**: Claude-powered knowledge extraction from conversations with Zod validation
 - **Obsidian Integration**: Full Obsidian syntax support with Dataview queries for visualization
 - **Canvas Visualizations**: Auto-generated dashboard, timeline, and graph canvases
+- **File-Based Indexing**: JSON index files for faster search operations
+- **Session Summaries**: Creates session summary notes with exploration history
 - **Project Organization**: Memories organized by project with cross-project patterns
 - **MCP Tools**: Search, read, and write memories directly from Claude Code
 - **Skills**: User-invokable commands (`/mem-search`, `/mem-save`, `/mem-status`)
@@ -91,6 +94,10 @@ The wizard will prompt you for your Obsidian vault path and create the config fi
     "enabled": true,
     "autoGenerate": true,
     "updateStrategy": "always"
+  },
+  "processing": {
+    "frequency": "compact-only",
+    "periodicInterval": 10
   }
 }
 ```
@@ -244,6 +251,7 @@ vault/
 │   ├── projects/
 │   │   └── {project-name}/
 │   │       ├── {project-name}.md    # Project overview
+│   │       ├── _index.json          # Project index (auto-generated for fast search)
 │   │       ├── errors/
 │   │       │   ├── errors.md        # Category index
 │   │       │   └── *.md             # Error patterns
@@ -262,6 +270,8 @@ vault/
 │   │       ├── files/
 │   │       │   ├── files.md         # Category index
 │   │       │   └── *.md             # File-specific knowledge
+│   │       ├── sessions/            # Session summary notes
+│   │       │   └── *.md             # {date}_{session_id}.md
 │   │       └── canvases/
 │   │           ├── dashboard.canvas # Grid layout by folder type
 │   │           ├── timeline.canvas  # Decisions chronologically
@@ -272,7 +282,7 @@ vault/
 │   └── templates/                   # Note templates
 ```
 
-> **Note**: Session data is stored ephemerally in `~/.cc-obsidian-mem/sessions/` during active sessions and cleaned up when sessions end. Only persistent knowledge is stored in the vault.
+> **Note**: Session data is stored ephemerally in `~/.cc-obsidian-mem/sessions/` during active sessions (including `{session_id}.json` for state and `{session_id}.exploration.jsonl` for exploration tracking) and cleaned up when sessions end. Only persistent knowledge is stored in the vault.
 
 ### Note Linking
 
@@ -368,9 +378,9 @@ cc-obsidian-mem/
 │   ├── scripts/             # Utility scripts
 │   ├── skills/              # Skill definitions
 │   └── src/
-│       ├── mcp-server/      # MCP server
-│       ├── services/        # AI services
-│       └── shared/          # Shared utilities
+│       ├── mcp-server/      # MCP server + index-manager
+│       ├── services/        # AI services + transcript parsing
+│       └── shared/          # Types, config, schemas, file-utils
 ```
 
 ### Running Tests

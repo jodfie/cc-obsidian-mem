@@ -5,17 +5,20 @@ import type { Note, NoteFrontmatter, WriteNoteInput, NoteType, SearchResult, Pro
 import { loadConfig, getMemFolderPath, getProjectPath, sanitizeProjectName } from '../../shared/config.js';
 import { PROJECTS_FOLDER, TEMPLATES_FOLDER } from '../../shared/constants.js';
 import { createLogger, type Logger } from '../../shared/logger.js';
+import { IndexManager } from './index-manager.js';
 
 export class VaultManager {
   private vaultPath: string;
   private memFolder: string;
   private logger: Logger;
+  private indexManager: IndexManager;
 
   constructor(vaultPath?: string, memFolder?: string) {
     const config = loadConfig();
     this.vaultPath = vaultPath || config.vault.path;
     this.memFolder = memFolder || config.vault.memFolder;
     this.logger = createLogger('vault'); // Logs to MCP log (shared)
+    this.indexManager = new IndexManager(this.getMemPath());
   }
 
   /**
@@ -367,6 +370,13 @@ LIMIT 10
     // Log the file operation
     const action = !exists ? 'Created' : (input.append ? 'Appended to' : 'Updated');
     this.logger.info(`${action} note: ${fullPath}`, { type: input.type, title: input.title, project: input.project });
+
+    // Update index (don't fail write on index errors)
+    try {
+      await this.indexManager.updateIndexEntry(fullPath);
+    } catch (indexError) {
+      this.logger.error('Failed to update index (note was written successfully)', indexError instanceof Error ? indexError : undefined);
+    }
 
     return { path: notePath, created: !exists };
   }
@@ -750,6 +760,7 @@ ${keyPointsSection}${sourceSection}
   /**
    * Search notes by content (keyword search)
    * Excludes research/ folder (use searchKnowledge for that)
+   * Uses index for fast filtering when project is specified, falls back to file scan
    */
   async searchNotes(query: string, options: {
     project?: string;
@@ -760,7 +771,72 @@ ${keyPointsSection}${sourceSection}
   } = {}): Promise<SearchResult[]> {
     const results: SearchResult[] = [];
     const limit = options.limit || 10;
+    const queryLower = query.toLowerCase();
 
+    // Try index-based search for project-scoped queries
+    if (options.project) {
+      try {
+        const indexResults = await this.indexManager.searchByIndex(
+          options.project,
+          {
+            query,
+            type: options.type,
+            tags: options.tags,
+            limit: limit * 2, // Get more results to filter research/ and verify content
+          }
+        );
+
+        if (indexResults.length > 0) {
+          // Convert index results to SearchResults, filtering out research/
+          for (const entry of indexResults) {
+            if (results.length >= limit) break;
+
+            // Skip research/ folder
+            if (entry.path.includes('/research/') || entry.path.includes('\\research\\')) {
+              continue;
+            }
+
+            // For full content search, verify the match in the actual file
+            // (index snippet is only 200 chars)
+            const fullPath = path.join(this.vaultPath, entry.path);
+            if (fs.existsSync(fullPath)) {
+              try {
+                const raw = fs.readFileSync(fullPath, 'utf-8');
+                const { frontmatter, content } = parseFrontmatter(raw);
+                const fullText = (content + ' ' + (frontmatter.title || '')).toLowerCase();
+
+                if (fullText.includes(queryLower)) {
+                  results.push({
+                    id: path.basename(entry.path, '.md'),
+                    title: entry.title,
+                    type: entry.type as NoteType,
+                    path: entry.path,
+                    snippet: options.lightweight ? undefined : this.extractSnippet(content, query),
+                    score: this.calculateScore(fullText, queryLower),
+                    metadata: {
+                      project: options.project,
+                      ...(options.lightweight ? {} : { date: entry.created, tags: entry.tags }),
+                    },
+                  });
+                }
+              } catch {
+                // Skip files that can't be parsed
+              }
+            }
+          }
+
+          if (results.length > 0) {
+            results.sort((a, b) => b.score - a.score);
+            return results.slice(0, limit);
+          }
+        }
+      } catch {
+        // Index search failed, fall back to file-based search
+        this.logger.debug('Index search failed, falling back to file scan');
+      }
+    }
+
+    // Fall back to file-based search (no project specified or index search failed)
     const searchDir = options.project
       ? path.join(this.getMemPath(), PROJECTS_FOLDER, sanitizeProjectName(options.project))
       : this.getMemPath();
@@ -770,7 +846,6 @@ ${keyPointsSection}${sourceSection}
     }
 
     const files = this.walkDir(searchDir, '.md');
-    const queryLower = query.toLowerCase();
 
     for (const file of files) {
       if (results.length >= limit) break;
@@ -1042,32 +1117,35 @@ ${keyPointsSection}${sourceSection}
     let useDate = true;
     let fallbackSlug = 'untitled';
 
+    // Note: input.project is guaranteed to be defined by the caller (writeNote validates this)
+    const project = sanitizeProjectName(input.project!);
+
     switch (input.type) {
       case 'error':
-        folder = `${PROJECTS_FOLDER}/${sanitizeProjectName(input.project)}/errors`;
+        folder = `${PROJECTS_FOLDER}/${project}/errors`;
         fallbackSlug = 'untitled-error';
         break;
       case 'decision':
-        folder = `${PROJECTS_FOLDER}/${sanitizeProjectName(input.project)}/decisions`;
+        folder = `${PROJECTS_FOLDER}/${project}/decisions`;
         // Decisions use slug-only paths so same title appends to same file
         useDate = false;
         fallbackSlug = 'untitled-decision';
         break;
       case 'pattern':
-        folder = `${PROJECTS_FOLDER}/${sanitizeProjectName(input.project)}/patterns`;
+        folder = `${PROJECTS_FOLDER}/${project}/patterns`;
         // Patterns also use slug-only paths
         useDate = false;
         fallbackSlug = 'untitled-pattern';
         break;
       case 'file':
         // File knowledge is routed to patterns folder
-        folder = `${PROJECTS_FOLDER}/${sanitizeProjectName(input.project)}/patterns`;
+        folder = `${PROJECTS_FOLDER}/${project}/patterns`;
         fallbackSlug = 'untitled-file';
         break;
       case 'learning':
       default:
         // Learnings go to research folder
-        folder = `${PROJECTS_FOLDER}/${sanitizeProjectName(input.project)}/research`;
+        folder = `${PROJECTS_FOLDER}/${project}/research`;
         fallbackSlug = 'untitled-learning';
     }
 

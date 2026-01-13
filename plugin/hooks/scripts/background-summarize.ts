@@ -15,10 +15,11 @@
 import * as fs from 'fs';
 import { spawn } from 'child_process';
 import { loadConfig, sanitizeProjectName } from '../../src/shared/config.js';
-import { parseTranscript, extractQAPairs, extractWebResearch } from '../../src/services/transcript.js';
+import { parseTranscript, extractQAPairs, extractWebResearch, extractCodebaseExploration } from '../../src/services/transcript.js';
 import { markBackgroundJobCompleted } from '../../src/shared/session-store.js';
 import { VaultManager } from '../../src/mcp-server/utils/vault.js';
 import { createLogger } from '../../src/shared/logger.js';
+import { ExtractionResultSchema, type ExtractionResult } from '../../src/shared/schemas.js';
 
 interface SummarizeInput {
   transcript_path: string;
@@ -35,6 +36,7 @@ interface KnowledgeResult {
   summary: string;
   keyPoints: string[];
   topics: string[];
+  files_referenced?: string[];
   relevance?: 'project' | 'skip';
 }
 
@@ -111,8 +113,9 @@ async function main() {
     // Build context for AI summarization
     const qaPairs = extractQAPairs(filteredConversation);
     const research = extractWebResearch(filteredConversation);
+    const exploration = extractCodebaseExploration(filteredConversation);
 
-    logger.info(`Found ${qaPairs.length} Q&A pairs, ${research.length} research items`);
+    logger.info(`Found ${qaPairs.length} Q&A pairs, ${research.length} research items, ${exploration.filesRead.length} files explored`);
 
     // Log Q&A and research previews for debugging
     if (qaPairs.length > 0) {
@@ -123,7 +126,7 @@ async function main() {
     }
 
     // Build context - will use conversation fallback if no Q&A or research
-    const contextText = buildContextForSummarization(qaPairs, research, filteredConversation);
+    const contextText = buildContextForSummarization(qaPairs, research, filteredConversation, exploration);
 
     // Skip if context is too short for meaningful summarization
     if (contextText.length < 500) {
@@ -162,113 +165,18 @@ async function main() {
 
     // Filter and write knowledge to vault
     try {
-        const VALID_TYPES = ['qa', 'explanation', 'decision', 'research', 'learning'];
-        const isWorkingOnMemPlugin = projectName.toLowerCase().includes('cc-obsidian-mem');
+      const validItems = filterKnowledgeItems(knowledgeItems, projectName, input.session_id, logger);
 
-        let skippedByAI = 0;
-        let skippedByGuardrail = 0;
-
-        // Filter and map valid items (with type guards for malformed AI output)
-        const validItems: Array<{
-          type: 'qa' | 'explanation' | 'decision' | 'research' | 'learning';
-          title: string;
-          context: string;
-          content: string;
-          keyPoints: string[];
-          topics: string[];
-          sourceSession: string;
-        }> = [];
-
-        for (const item of knowledgeItems) {
-          const typeStr = typeof item.type === 'string' ? item.type.trim().toLowerCase() : '';
-          const titleStr = typeof item.title === 'string' ? item.title : '';
-          const summaryStr = typeof item.summary === 'string' ? item.summary : '';
-          const hasRequiredFields = typeStr && titleStr && summaryStr;
-          const hasValidType = VALID_TYPES.includes(typeStr);
-
-          if (!hasRequiredFields || !hasValidType) {
-            logger.debug(`Skipping invalid AI item: type=${String(item.type).substring(0, 20)}, title=${String(item.title).substring(0, 30)}`);
-            continue;
-          }
-
-          // Normalize and validate relevance field
-          let relevance: 'project' | 'skip' = 'project'; // Default: keep
-          if (item.relevance) {
-            const normalized = (typeof item.relevance === 'string' ? item.relevance.trim().toLowerCase() : '');
-            if (normalized === 'project' || normalized === 'skip') {
-              relevance = normalized;
-            }
-          }
-
-          // Filter arrays to only string items to prevent writeKnowledge failures
-          const keyPoints = Array.isArray(item.keyPoints)
-            ? item.keyPoints.filter((k: unknown) => typeof k === 'string')
-            : [];
-          const topics = Array.isArray(item.topics)
-            ? item.topics.filter((t: unknown) => typeof t === 'string')
-            : [];
-
-          // Deterministic guardrail: force-skip cc-obsidian-mem mentions when working on other projects
-          const contextStr = typeof item.context === 'string' ? item.context : '';
-          if (!isWorkingOnMemPlugin && relevance === 'project') {
-            const mentionsMemPlugin = (
-              (topics || []).some(t => t.toLowerCase().includes('cc-obsidian-mem')) ||
-              titleStr.toLowerCase().includes('cc-obsidian-mem') ||
-              summaryStr.toLowerCase().includes('cc-obsidian-mem') ||
-              contextStr.toLowerCase().includes('cc-obsidian-mem') ||
-              keyPoints.some(k => k.toLowerCase().includes('cc-obsidian-mem'))
-            );
-
-            if (mentionsMemPlugin) {
-              relevance = 'skip';
-              skippedByGuardrail++;
-              logger.debug(`Guardrail skipped: "${titleStr.substring(0, 50)}" (mentions cc-obsidian-mem)`);
-            }
-          }
-
-          // Skip items marked as irrelevant
-          if (relevance === 'skip') {
-            // Count AI skips separately from guardrail skips
-            // Guardrail already incremented skippedByGuardrail above
-            // Only count as AI skip if guardrail didn't trigger (check original value)
-            const originalRelevance = item.relevance ?
-              (typeof item.relevance === 'string' ? item.relevance.trim().toLowerCase() : '') : '';
-            const wasSkippedByAI = originalRelevance === 'skip';
-
-            if (wasSkippedByAI) {
-              skippedByAI++;
-              logger.debug(`Skipped by AI: "${titleStr.substring(0, 50)}"`);
-            }
-            continue;
-          }
-
-          validItems.push({
-            type: typeStr as 'qa' | 'explanation' | 'decision' | 'research' | 'learning',
-            title: titleStr,
-            context: typeof item.context === 'string' ? item.context : '',
-            content: summaryStr,
-            keyPoints,
-            topics,
-            sourceSession: input.session_id,
-          });
-        }
-
-        const keptTitles = validItems.map(i => i.title.substring(0, 30)).join(', ');
-        logger.info(`Processed ${knowledgeItems.length} items: ${validItems.length} kept, ${skippedByAI + skippedByGuardrail} skipped (${skippedByAI} by AI, ${skippedByGuardrail} by guardrail)`);
-        if (validItems.length > 0) {
-          logger.debug(`Kept items: ${keptTitles}${keptTitles.length > 100 ? '...' : ''}`);
-        }
-
-        if (validItems.length === 0) {
-          logger.info('No valid knowledge items to write');
-        } else {
-          const vault = new VaultManager(config.vault.path, config.vault.memFolder);
-          const paths = await vault.writeKnowledgeBatch(validItems, projectName);
-          logger.info(`Wrote ${paths.length}/${validItems.length} knowledge notes to vault`);
-        }
-      } catch (error) {
-        logger.error(`Failed to write knowledge to vault`, error instanceof Error ? error : undefined);
+      if (validItems.length === 0) {
+        logger.info('No valid knowledge items to write');
+      } else {
+        const vault = new VaultManager(config.vault.path, config.vault.memFolder);
+        const paths = await vault.writeKnowledgeBatch(validItems, projectName);
+        logger.info(`Wrote ${paths.length}/${validItems.length} knowledge notes to vault`);
       }
+    } catch (error) {
+      logger.error(`Failed to write knowledge to vault`, error instanceof Error ? error : undefined);
+    }
 
     // Mark background job as completed (so session-end doesn't wait)
     if (input.trigger === 'pre-compact') {
@@ -294,9 +202,39 @@ async function main() {
 function buildContextForSummarization(
   qaPairs: Array<{ question: string; answer: string }>,
   research: Array<{ tool: string; query?: string; url?: string; content: string }>,
-  conversation: { turns: Array<{ role: string; text: string }> }
+  conversation: { turns: Array<{ role: string; text: string }> },
+  exploration?: {
+    filesRead: string[];
+    patternsSearched: Array<{ pattern: string; tool: string; count?: number }>;
+    directoryStructure: string[];
+  }
 ): string {
   const sections: string[] = [];
+
+  // Add codebase exploration context (if available)
+  if (exploration && (exploration.filesRead.length > 0 || exploration.patternsSearched.length > 0)) {
+    sections.push('## Codebase Exploration\n');
+
+    if (exploration.filesRead.length > 0) {
+      sections.push(`Files examined (${exploration.filesRead.length}):`);
+      sections.push(exploration.filesRead.slice(0, 15).map(f => `- ${f}`).join('\n'));
+      if (exploration.filesRead.length > 15) {
+        sections.push(`... and ${exploration.filesRead.length - 15} more files`);
+      }
+      sections.push('');
+    }
+
+    if (exploration.patternsSearched.length > 0) {
+      sections.push(`Search patterns used:`);
+      for (const { pattern, tool, count } of exploration.patternsSearched.slice(0, 8)) {
+        sections.push(`- ${tool}: "${pattern}" (${count || 0} matches)`);
+      }
+      if (exploration.patternsSearched.length > 8) {
+        sections.push(`... and ${exploration.patternsSearched.length - 8} more patterns`);
+      }
+      sections.push('');
+    }
+  }
 
   // Add Q&A pairs
   if (qaPairs.length > 0) {
@@ -329,6 +267,96 @@ function buildContextForSummarization(
   return sections.join('\n').substring(0, 25000);
 }
 
+const VALID_KNOWLEDGE_TYPES = ['qa', 'explanation', 'decision', 'research', 'learning'] as const;
+type KnowledgeType = typeof VALID_KNOWLEDGE_TYPES[number];
+
+interface ValidKnowledgeItem {
+  type: KnowledgeType;
+  title: string;
+  context: string;
+  content: string;
+  keyPoints: string[];
+  topics: string[];
+  sourceSession: string;
+}
+
+/**
+ * Filter and validate AI-generated knowledge items
+ */
+function filterKnowledgeItems(
+  items: KnowledgeResult[],
+  projectName: string,
+  sessionId: string,
+  logger: ReturnType<typeof createLogger>
+): ValidKnowledgeItem[] {
+  const isWorkingOnMemPlugin = projectName.toLowerCase().includes('cc-obsidian-mem');
+  const validItems: ValidKnowledgeItem[] = [];
+  let skippedByAI = 0;
+  let skippedByGuardrail = 0;
+
+  for (const item of items) {
+    // Normalize fields with type guards for malformed AI output
+    const typeStr = typeof item.type === 'string' ? item.type.trim().toLowerCase() : '';
+    const titleStr = typeof item.title === 'string' ? item.title : '';
+    const summaryStr = typeof item.summary === 'string' ? item.summary : '';
+    const contextStr = typeof item.context === 'string' ? item.context : '';
+
+    // Validate required fields
+    if (!typeStr || !titleStr || !summaryStr || !VALID_KNOWLEDGE_TYPES.includes(typeStr as KnowledgeType)) {
+      logger.debug(`Skipping invalid AI item: type=${String(item.type).substring(0, 20)}, title=${String(item.title).substring(0, 30)}`);
+      continue;
+    }
+
+    // Filter arrays to only string items
+    const keyPoints = Array.isArray(item.keyPoints)
+      ? item.keyPoints.filter((k: unknown): k is string => typeof k === 'string')
+      : [];
+    const topics = Array.isArray(item.topics)
+      ? item.topics.filter((t: unknown): t is string => typeof t === 'string')
+      : [];
+
+    // Determine relevance
+    const originalRelevance = typeof item.relevance === 'string' ? item.relevance.trim().toLowerCase() : '';
+    let relevance: 'project' | 'skip' = (originalRelevance === 'skip') ? 'skip' : 'project';
+
+    // Guardrail: force-skip cc-obsidian-mem mentions when working on other projects
+    if (!isWorkingOnMemPlugin && relevance === 'project') {
+      const allText = [titleStr, summaryStr, contextStr, ...keyPoints, ...topics].join(' ').toLowerCase();
+      if (allText.includes('cc-obsidian-mem')) {
+        relevance = 'skip';
+        skippedByGuardrail++;
+        logger.debug(`Guardrail skipped: "${titleStr.substring(0, 50)}" (mentions cc-obsidian-mem)`);
+      }
+    }
+
+    if (relevance === 'skip') {
+      if (originalRelevance === 'skip') {
+        skippedByAI++;
+        logger.debug(`Skipped by AI: "${titleStr.substring(0, 50)}"`);
+      }
+      continue;
+    }
+
+    validItems.push({
+      type: typeStr as KnowledgeType,
+      title: titleStr,
+      context: contextStr,
+      content: summaryStr,
+      keyPoints,
+      topics,
+      sourceSession: sessionId,
+    });
+  }
+
+  const keptTitles = validItems.map(i => i.title.substring(0, 30)).join(', ');
+  logger.info(`Processed ${items.length} items: ${validItems.length} kept, ${skippedByAI + skippedByGuardrail} skipped (${skippedByAI} by AI, ${skippedByGuardrail} by guardrail)`);
+  if (validItems.length > 0) {
+    logger.debug(`Kept items: ${keptTitles}${keptTitles.length > 100 ? '...' : ''}`);
+  }
+
+  return validItems;
+}
+
 /**
  * Run claude -p to extract knowledge
  */
@@ -359,6 +387,7 @@ For each item, provide:
 - summary: key information (max 100 words)
 - keyPoints: array of actionable points (2-5 items)
 - topics: array of relevant topic tags (2-5 items)
+- files_referenced: array of file paths relevant to this knowledge (from the "Codebase Exploration" section if available)
 - relevance: REQUIRED - classify as either "project" or "skip"
   - "project" = knowledge directly about ${projectName}'s codebase, APIs, architecture, or project-specific patterns
   - "skip" = meta-tooling discussions (e.g., how to use cc-obsidian-mem when working on other projects), or general programming knowledge not specific to this project
@@ -429,7 +458,26 @@ Respond with ONLY valid JSON, no markdown code blocks, no explanation.`;
         }
 
         const parsed = JSON.parse(jsonStr);
+
+        // Try Zod validation first for structured parsing
         if (Array.isArray(parsed)) {
+          try {
+            // Wrap array in object for schema validation
+            const result = ExtractionResultSchema.safeParse({ knowledge: parsed });
+            if (result.success) {
+              logger.debug('Zod validation successful');
+              resolve(result.data.knowledge as KnowledgeResult[]);
+              return;
+            } else {
+              logger.debug('Zod validation failed, falling back to legacy parsing', {
+                error: result.error.message,
+              });
+            }
+          } catch (zodError) {
+            logger.debug('Zod validation error, falling back to legacy parsing');
+          }
+
+          // Fallback to legacy array parsing
           resolve(parsed as KnowledgeResult[]);
         } else {
           logger.error(`Unexpected response format: ${typeof parsed}`);

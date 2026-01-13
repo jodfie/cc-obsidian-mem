@@ -40,6 +40,10 @@ const DEFAULT_CONFIG: Config = {
     verbose: false,      // OFF by default - enables debug logging when true
     logDir: os.tmpdir(), // Default to system temp directory
   },
+  processing: {
+    frequency: 'compact-only',  // Only extract knowledge during /compact
+    periodicInterval: 10,       // 10 minutes default if periodic is enabled
+  },
 };
 
 let cachedConfig: Config | null = null;
@@ -158,6 +162,9 @@ function deepMerge(target: Config, source: Partial<Config>): Config {
   }
   if (source.logging) {
     result.logging = { ...result.logging, ...source.logging };
+  }
+  if (source.processing) {
+    result.processing = { ...result.processing, ...source.processing };
   }
 
   return result;

@@ -3,6 +3,7 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import type { Session, Observation } from './types.js';
 import { getConfigDir } from './config.js';
+import { atomicWriteSync, ensureDir } from './file-utils.js';
 
 /**
  * File-based session store with multi-session support
@@ -67,6 +68,13 @@ function getObservationsFilePath(sessionId: string): string {
 }
 
 /**
+ * Get the path to a session's exploration file (JSONL format)
+ */
+export function getExplorationFilePath(sessionId: string): string {
+  return path.join(getSessionsDir(), `${safeSessionFilename(sessionId)}.exploration.jsonl`);
+}
+
+/**
  * Get the path to a session's lock file
  */
 function getLockFilePath(sessionId: string): string {
@@ -77,33 +85,7 @@ function getLockFilePath(sessionId: string): string {
  * Ensure sessions directory exists
  */
 function ensureSessionsDir(): void {
-  const dir = getSessionsDir();
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
-}
-
-/**
- * Atomic write to file using temp file + rename
- */
-function atomicWriteSync(filePath: string, data: string): void {
-  const dir = path.dirname(filePath);
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
-
-  const tempPath = `${filePath}.${crypto.randomBytes(6).toString('hex')}.tmp`;
-  try {
-    fs.writeFileSync(tempPath, data, { mode: 0o600 });
-    fs.renameSync(tempPath, filePath);
-  } catch (error) {
-    try {
-      fs.unlinkSync(tempPath);
-    } catch {
-      // Ignore cleanup errors
-    }
-    throw error;
-  }
+  ensureDir(getSessionsDir());
 }
 
 /**
@@ -252,6 +234,122 @@ function appendObservation(sessionId: string, observation: Observation): boolean
   } finally {
     releaseLock(sessionId);
   }
+}
+
+/**
+ * Append an exploration entry to the JSONL file
+ * Uses simple append without locking (hooks are single-threaded)
+ * Returns true on success, false if size limit exceeded or on error
+ */
+export function appendExploration(sessionId: string, exploration: import('./types.js').ExplorationData): boolean {
+  ensureSessionsDir();
+
+  try {
+    const explPath = getExplorationFilePath(sessionId);
+
+    // Check size limit (max 5000 entries)
+    if (fs.existsSync(explPath)) {
+      const content = fs.readFileSync(explPath, 'utf-8');
+      const lineCount = content.split('\n').filter(line => line.trim()).length;
+      if (lineCount >= 5000) {
+        return false; // Size limit exceeded
+      }
+    }
+
+    const line = JSON.stringify(exploration) + '\n';
+    fs.appendFileSync(explPath, line, { mode: 0o600 });
+    return true;
+  } catch (error) {
+    console.error(`Failed to write exploration for session ${sessionId}:`, error);
+    return false;
+  }
+}
+
+/**
+ * Read explorations from JSONL file
+ * Skips malformed lines and deduplicates paths/patterns
+ */
+export function readExplorations(sessionId: string): import('./types.js').ExplorationData[] {
+  const explPath = getExplorationFilePath(sessionId);
+
+  if (!fs.existsSync(explPath)) {
+    return [];
+  }
+
+  try {
+    const content = fs.readFileSync(explPath, 'utf-8');
+    const lines = content.split('\n');
+    const explorations: import('./types.js').ExplorationData[] = [];
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+
+      try {
+        const expl = JSON.parse(trimmed) as import('./types.js').ExplorationData;
+        if (expl.action) {
+          explorations.push(expl);
+        }
+      } catch {
+        // Skip malformed lines
+      }
+    }
+
+    return explorations;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Get aggregated exploration summary for a session
+ * Deduplicates paths and patterns
+ */
+export function getSessionExplorationSummary(sessionId: string): import('./types.js').SessionExploration {
+  const explorations = readExplorations(sessionId);
+
+  const filesRead = new Set<string>();
+  const patternsSearched = new Set<string>();
+  const globsMatched = new Set<string>();
+
+  for (const expl of explorations) {
+    if (expl.paths) {
+      for (const p of expl.paths) {
+        if (expl.action === 'read') {
+          filesRead.add(p);
+        }
+      }
+    }
+    if (expl.query) {
+      patternsSearched.add(expl.query);
+    }
+    if (expl.patterns) {
+      for (const pat of expl.patterns) {
+        globsMatched.add(pat);
+      }
+    }
+  }
+
+  return {
+    files_read: Array.from(filesRead),
+    patterns_searched: Array.from(patternsSearched),
+    globs_matched: Array.from(globsMatched),
+    exploration_count: explorations.length,
+  };
+}
+
+/**
+ * Update last extraction leaf UUID in session metadata (for Phase 6)
+ */
+export function updateLastExtractionLeafUuid(sessionId: string, leafUuid: string): void {
+  const metadata = readSessionMetadata(sessionId);
+  if (!metadata) return;
+
+  // Add to metadata (we'll need to extend SessionMetadata type)
+  (metadata as SessionMetadata & { lastExtractionLeafUuid?: string }).lastExtractionLeafUuid = leafUuid;
+  (metadata as SessionMetadata & { lastExtractionTime?: string }).lastExtractionTime = new Date().toISOString();
+
+  writeSessionMetadata(metadata);
 }
 
 /**
@@ -692,12 +790,13 @@ export function clearSessionFile(sessionId: string, maxWaitMs: number = 5000): v
   try {
     const metaPath = getSessionFilePath(sessionId);
     const obsPath = getObservationsFilePath(sessionId);
+    const explPath = getExplorationFilePath(sessionId);
     const lockPath = getLockFilePath(sessionId);
     const pendingLockPath = getPendingLockPath(sessionId);
 
-    // Delete metadata, observations, pending files and pending lock
+    // Delete metadata, observations, exploration, pending files and pending lock
     // Note: pendingPath is cleared separately after waiting
-    for (const filePath of [metaPath, obsPath, pendingPath, pendingLockPath]) {
+    for (const filePath of [metaPath, obsPath, explPath, pendingPath, pendingLockPath]) {
       try {
         if (fs.existsSync(filePath)) {
           fs.unlinkSync(filePath);

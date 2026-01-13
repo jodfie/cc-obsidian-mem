@@ -146,7 +146,7 @@ export function parseTranscript(transcriptPath: string): ParsedConversation {
         const summaryEntry = entry as TranscriptSummary;
         summary = summaryEntry.summary;
         // Support both camelCase and snake_case for schema compatibility
-        leafUuid = summaryEntry.leafUuid ?? (summaryEntry as Record<string, unknown>).leaf_uuid as string | undefined;
+        leafUuid = summaryEntry.leafUuid ?? (summaryEntry as unknown as Record<string, unknown>).leaf_uuid as string | undefined;
         continue;
       }
 
@@ -356,4 +356,124 @@ export function getConversationForAnalysis(
   }
 
   return lines.join('\n\n');
+}
+
+/**
+ * Extract codebase exploration data from conversation turns
+ * Parses Read/Grep/Glob tool calls to understand what files were examined
+ */
+export function extractCodebaseExploration(conversation: ParsedConversation): {
+  filesRead: string[];
+  patternsSearched: Array<{ pattern: string; tool: string; count?: number }>;
+  directoryStructure: string[];
+} {
+  const filesRead = new Set<string>();
+  const patternsSearched: Array<{ pattern: string; tool: string; count?: number }> = [];
+  const directoryStructure = new Set<string>();
+
+  for (const turn of conversation.turns) {
+    if (!turn.toolCalls) continue;
+
+    for (const tool of turn.toolCalls) {
+      if (tool.name === 'Read') {
+        // Extract file path from Read tool
+        const filePath = tool.input.file_path as string | undefined;
+        if (filePath) {
+          filesRead.add(filePath);
+        }
+      } else if (tool.name === 'Grep') {
+        // Extract search pattern and matched files
+        const pattern = tool.input.pattern as string | undefined;
+        if (pattern) {
+          // Parse output to count matches
+          const output = tool.output || '';
+          const fileMatches = output.match(/^[^:]+:\d+:/gm);
+          const uniqueFiles = new Set<string>();
+          if (fileMatches) {
+            for (const match of fileMatches) {
+              const filePath = match.split(':')[0];
+              if (filePath) {
+                uniqueFiles.add(filePath);
+              }
+            }
+          }
+
+          patternsSearched.push({
+            pattern,
+            tool: 'Grep',
+            count: uniqueFiles.size,
+          });
+
+          // Add matched files to filesRead
+          uniqueFiles.forEach(f => filesRead.add(f));
+        }
+      } else if (tool.name === 'Glob') {
+        // Extract glob pattern and matched files
+        const pattern = tool.input.pattern as string | undefined;
+        if (pattern) {
+          directoryStructure.add(pattern);
+
+          // Parse output to get matched files
+          const output = tool.output || '';
+          const lines = output.split('\n').filter(l => l.trim());
+          patternsSearched.push({
+            pattern,
+            tool: 'Glob',
+            count: lines.length,
+          });
+        }
+      }
+    }
+  }
+
+  return {
+    filesRead: Array.from(filesRead),
+    patternsSearched,
+    directoryStructure: Array.from(directoryStructure),
+  };
+}
+
+/**
+ * Get conversation with enhanced exploration context prepended
+ * This includes file exploration history for better AI summarization
+ */
+export function getEnhancedConversationForAnalysis(
+  conversation: ParsedConversation,
+  maxLength: number = 30000
+): string {
+  const exploration = extractCodebaseExploration(conversation);
+
+  // Build exploration context section
+  const explorationContext: string[] = [];
+
+  if (exploration.filesRead.length > 0) {
+    explorationContext.push(`## Codebase Exploration\n`);
+    explorationContext.push(`Files examined (${exploration.filesRead.length}):`);
+    explorationContext.push(exploration.filesRead.slice(0, 20).map(f => `- ${f}`).join('\n'));
+    if (exploration.filesRead.length > 20) {
+      explorationContext.push(`... and ${exploration.filesRead.length - 20} more files\n`);
+    }
+  }
+
+  if (exploration.patternsSearched.length > 0) {
+    explorationContext.push(`\nSearch patterns used:`);
+    for (const { pattern, tool, count } of exploration.patternsSearched.slice(0, 10)) {
+      explorationContext.push(`- ${tool}: "${pattern}" (${count || 0} matches)`);
+    }
+    if (exploration.patternsSearched.length > 10) {
+      explorationContext.push(`... and ${exploration.patternsSearched.length - 10} more patterns`);
+    }
+  }
+
+  const explorationSection = explorationContext.join('\n');
+
+  // Get the base conversation
+  const baseConversation = getConversationForAnalysis(conversation, maxLength - explorationSection.length - 100);
+
+  // Prepend exploration context
+  if (explorationSection) {
+    return `${explorationSection}\n\n---\n\n${baseConversation}`;
+  }
+
+  return baseConversation;
 }

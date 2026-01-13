@@ -97,7 +97,7 @@ cc-obsidian-mem/
 
 - `plugin/hooks/scripts/session-start.ts` - Initialize session tracking, inject project context, migrate legacy pending files
 - `plugin/hooks/scripts/user-prompt-submit.ts` - Track user prompts
-- `plugin/hooks/scripts/post-tool-use.ts` - Capture tool observations, extract knowledge from WebFetch/WebSearch/Context7
+- `plugin/hooks/scripts/post-tool-use.ts` - Capture tool observations, exploration tracking (Read/Grep/Glob), extract knowledge from WebFetch/WebSearch/Context7
 - `plugin/hooks/scripts/pre-compact.ts` - Trigger background summarization before compaction
 - `plugin/hooks/scripts/background-summarize.ts` - AI-powered knowledge extraction, writes directly to vault
 - `plugin/hooks/scripts/session-end.ts` - Generate canvas visualizations, cleanup session files
@@ -113,6 +113,13 @@ cc-obsidian-mem/
 - `plugin/src/mcp-server/index.ts` - MCP server entry point, registers all `mem_*` tools
 - `plugin/src/mcp-server/utils/vault.ts` - Vault read/write operations, note linking, superseding
 - `plugin/src/mcp-server/utils/canvas.ts` - Canvas generation (dashboard, timeline, graph layouts)
+- `plugin/src/mcp-server/utils/index-manager.ts` - JSON index management for faster search
+
+#### Shared Modules
+
+- `plugin/src/shared/schemas.ts` - Zod schemas for AI output validation
+- `plugin/src/shared/file-utils.ts` - Shared file utilities (atomic writes, ensureDir)
+- `plugin/src/shared/session-store.ts` - Session state and exploration tracking
 
 #### Utility Scripts
 
@@ -147,6 +154,9 @@ claude /plugin list
 - Project detection searches up the directory tree for `.git` to find the repo root
 - Canvas auto-generation requires `canvas.enabled: true` in config
 - Canvases are regenerated at session-end when enabled (respects `updateStrategy`)
+- File-based JSON indexes (`_index.json`) are auto-generated for faster search
+- Exploration tracking captures Read/Grep/Glob tool usage for session context
+- Session summary notes are created in `projects/{project}/sessions/` at session end
 
 ### Logging Configuration
 
@@ -198,6 +208,25 @@ Canvas files are created in `_claude-mem/projects/{project}/canvases/`:
 - `dashboard.canvas` - Grid layout grouped by folder type (errors, decisions, patterns, etc.)
 - `timeline.canvas` - Decisions sorted chronologically
 - `graph.canvas` - Radial knowledge graph centered on project
+
+### Processing Configuration
+
+To configure knowledge extraction frequency, add to `~/.cc-obsidian-mem/config.json`:
+
+```json
+"processing": {
+  "frequency": "compact-only",
+  "periodicInterval": 10
+}
+```
+
+| Option             | Values                      | Description                                          |
+| ------------------ | --------------------------- | ---------------------------------------------------- |
+| `frequency`        | `"compact-only"`/`"periodic"` | When to extract knowledge (default: `compact-only`) |
+| `periodicInterval` | number (minutes)            | Interval for periodic extraction (default: `10`)     |
+
+- `compact-only` - Only extract knowledge when `/compact` is run (recommended)
+- `periodic` - Extract knowledge every N minutes during active sessions
 
 ### Note Linking Structure
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
 import { loadConfig } from '../../src/shared/config.js';
-import { addObservation, readSession } from '../../src/shared/session-store.js';
+import { addObservation, readSession, appendExploration } from '../../src/shared/session-store.js';
 import { VaultManager } from '../../src/mcp-server/utils/vault.js';
 import {
   isSignificantAction,
@@ -12,7 +12,7 @@ import {
   readStdinJson,
 } from './utils/helpers.js';
 import { createLogger } from '../../src/shared/logger.js';
-import type { PostToolUseInput, Observation, ErrorData } from '../../src/shared/types.js';
+import type { PostToolUseInput, Observation, ErrorData, ExplorationData } from '../../src/shared/types.js';
 import { extractToolKnowledge } from '../../src/services/knowledge-extractor.js';
 import { sanitizeProjectName } from '../../src/shared/config.js';
 import * as fs from 'fs';
@@ -54,6 +54,25 @@ async function main() {
       } else {
         // Only extract knowledge from successful responses
         await processKnowledgeTool(input, session.project, session.id, config, logger);
+      }
+      return;
+    }
+
+    // Handle exploration tools (Read, Grep, Glob) - capture lightweight exploration data
+    // These tools don't create observations but log exploration activity
+    if (isExplorationTool(input.tool_name)) {
+      logger.debug('Exploration tool detected', { tool: input.tool_name });
+      try {
+        const explorationData = extractExplorationData(input, session.projectPath, logger);
+        if (explorationData) {
+          const success = appendExploration(input.session_id, explorationData);
+          if (!success) {
+            logger.info('Failed to append exploration (size limit or error)', { tool: input.tool_name });
+          }
+        }
+      } catch (error) {
+        // Never fail the hook on exploration capture failure
+        logger.error('Error capturing exploration', error instanceof Error ? error : undefined);
       }
       return;
     }
@@ -569,21 +588,161 @@ function hashFilePath(filePath: string): string {
   return crypto.createHash('md5').update(filePath).digest('hex').substring(0, 12);
 }
 
+// Error category patterns: [category, keywords to check in type/message]
+const ERROR_CATEGORIES: Array<[string, string[]]> = [
+  ['syntax', ['syntax']],
+  ['type', ['type']],
+  ['reference', ['reference', 'undefined']],
+  ['network', ['network', 'fetch', 'connection']],
+  ['permission', ['permission', 'access denied']],
+  ['not-found', ['not found', 'enoent']],
+];
+
 /**
  * Categorize an error type
  */
 function categorizeError(error: ErrorData): string {
-  const type = (error.type || '').toLowerCase();
-  const message = (error.message || '').toLowerCase();
+  const text = `${error.type || ''} ${error.message || ''}`.toLowerCase();
 
-  if (type.includes('syntax') || message.includes('syntax')) return 'syntax';
-  if (type.includes('type') || message.includes('type')) return 'type';
-  if (type.includes('reference') || message.includes('undefined')) return 'reference';
-  if (type.includes('network') || message.includes('fetch') || message.includes('connection')) return 'network';
-  if (type.includes('permission') || message.includes('access denied')) return 'permission';
-  if (message.includes('not found') || message.includes('enoent')) return 'not-found';
+  for (const [category, keywords] of ERROR_CATEGORIES) {
+    if (keywords.some(keyword => text.includes(keyword))) {
+      return category;
+    }
+  }
 
   return 'general';
+}
+
+const EXPLORATION_TOOLS = new Set(['Read', 'Grep', 'Glob']);
+
+/**
+ * Check if a tool is an exploration tool
+ */
+function isExplorationTool(toolName: string): boolean {
+  return EXPLORATION_TOOLS.has(toolName);
+}
+
+// Patterns for sensitive files that should not be logged
+const SENSITIVE_FILE_PATTERNS = [
+  /\.ssh/i,
+  /\.env/i,
+  /\.pem$/i,
+  /\.key$/i,
+  /\.git\/config$/i,
+  /\.npmrc$/i,
+  /\.pypirc$/i,
+  /credentials\.json$/i,
+  /secrets\./i,
+];
+
+/**
+ * Sanitize file path: convert absolute to project-relative and filter sensitive patterns
+ * CRITICAL: Only store paths, never content. Reject paths with '..' or outside project.
+ */
+function sanitizePath(absolutePath: string, projectPath: string): string | null {
+  const absPath = path.isAbsolute(absolutePath)
+    ? absolutePath
+    : path.resolve(projectPath, absolutePath);
+
+  const relativePath = path.relative(projectPath, absPath);
+
+  // Reject path traversal attempts
+  if (relativePath.startsWith('..') || relativePath.includes('/..') || relativePath.includes('\\..')) {
+    return null;
+  }
+
+  // Reject sensitive file patterns
+  if (SENSITIVE_FILE_PATTERNS.some(pattern => pattern.test(relativePath))) {
+    return null;
+  }
+
+  return relativePath;
+}
+
+/**
+ * Extract text content from tool response
+ */
+function getToolOutputText(response: PostToolUseInput['tool_response']): string {
+  return response.content
+    .filter(c => c.type === 'text' && c.text)
+    .map(c => c.text)
+    .join('\n');
+}
+
+/**
+ * Extract exploration data from tool input/output
+ * CRITICAL: Only extract paths, patterns, and counts - NEVER store content
+ */
+function extractExplorationData(
+  input: PostToolUseInput,
+  projectPath: string,
+  logger: ReturnType<typeof createLogger>
+): ExplorationData | null {
+  const { tool_name: toolName, tool_input: toolInput, tool_response: toolResponse } = input;
+
+  try {
+    switch (toolName) {
+      case 'Read': {
+        const filePath = toolInput.file_path as string | undefined;
+        if (!filePath) return null;
+
+        const sanitized = sanitizePath(filePath, projectPath);
+        if (!sanitized) {
+          logger.debug('Path rejected by sanitization', { path: filePath });
+          return null;
+        }
+
+        return { action: 'read', paths: [sanitized] };
+      }
+
+      case 'Grep': {
+        const pattern = toolInput.pattern as string | undefined;
+        if (!pattern) return null;
+
+        // Extract file paths from grep output (format: "path/to/file:line_number:...")
+        const outputText = getToolOutputText(toolResponse);
+        const uniquePaths = new Set<string>();
+
+        for (const match of outputText.matchAll(/^([^:]+):\d+:/gm)) {
+          const sanitized = match[1] ? sanitizePath(match[1], projectPath) : null;
+          if (sanitized) uniquePaths.add(sanitized);
+        }
+
+        return {
+          action: 'search',
+          query: pattern,
+          paths: Array.from(uniquePaths),
+          results_count: uniquePaths.size,
+        };
+      }
+
+      case 'Glob': {
+        const pattern = toolInput.pattern as string | undefined;
+        if (!pattern) return null;
+
+        const outputText = getToolOutputText(toolResponse);
+        const paths = outputText
+          .split('\n')
+          .map(line => line.trim())
+          .filter(Boolean)
+          .map(line => sanitizePath(line, projectPath))
+          .filter((p): p is string => p !== null);
+
+        return {
+          action: 'glob',
+          patterns: [pattern],
+          paths,
+          results_count: paths.length,
+        };
+      }
+
+      default:
+        return null;
+    }
+  } catch (error) {
+    logger.error('Error extracting exploration data', error instanceof Error ? error : undefined);
+    return null;
+  }
 }
 
 main();

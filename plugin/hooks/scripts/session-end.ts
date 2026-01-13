@@ -15,15 +15,16 @@
  * where there's a subsequent message for pending injection.
  */
 
+import * as fs from 'fs';
 import * as path from 'path';
-import { loadConfig, getProjectPath } from '../../src/shared/config.js';
-import { endSession, readSession, clearSessionFile } from '../../src/shared/session-store.js';
+import { loadConfig, getProjectPath, sanitizeProjectName } from '../../src/shared/config.js';
+import { endSession, readSession, clearSessionFile, getSessionExplorationSummary } from '../../src/shared/session-store.js';
 import { VaultManager } from '../../src/mcp-server/utils/vault.js';
 import { generateProjectCanvases, detectFolder, type CanvasNote } from '../../src/mcp-server/utils/canvas.js';
 import { readStdinJson } from './utils/helpers.js';
 import { clearPending } from './utils/pending.js';
 import { createLogger, cleanupOldLogs } from '../../src/shared/logger.js';
-import type { SessionEndInput } from '../../src/shared/types.js';
+import type { SessionEndInput, Session, SessionExploration } from '../../src/shared/types.js';
 
 async function main() {
   try {
@@ -58,6 +59,18 @@ async function main() {
     logger.info(`Session ended`, { project: session.project, endType, duration: session.durationMinutes });
 
     const config = loadConfig();
+
+    // Create session summary note if session has meaningful content
+    try {
+      const exploration = getSessionExplorationSummary(input.session_id);
+      if (exploration.exploration_count > 0 || session.filesModified.length > 0) {
+        const projectPath = getProjectPath(session.project, config);
+        await createSessionSummaryNote(session, exploration, projectPath, config.vault.memFolder, logger);
+      }
+    } catch (summaryError) {
+      // Never fail the hook on summary note failure
+      logger.error('Session summary note creation failed', summaryError instanceof Error ? summaryError : undefined);
+    }
 
     // Generate/update project canvases if enabled
     if (config.canvas?.enabled) {
@@ -137,6 +150,124 @@ async function main() {
     // Silently fail to not break Claude Code (don't use logger here, might not be initialized)
     console.error('Session end hook error:', error);
   }
+}
+
+/**
+ * Create a session summary note in the vault
+ * Includes exploration activity, files modified, and session metadata
+ */
+async function createSessionSummaryNote(
+  session: Session,
+  exploration: SessionExploration,
+  projectPath: string,
+  memFolder: string,
+  logger: ReturnType<typeof createLogger>
+): Promise<void> {
+  const sessionsDir = path.join(projectPath, 'sessions');
+
+  // Ensure sessions directory exists
+  if (!fs.existsSync(sessionsDir)) {
+    fs.mkdirSync(sessionsDir, { recursive: true });
+  }
+
+  // Generate filename: YYYY-MM-DD_<session_id_short>.md
+  const date = new Date(session.startTime).toISOString().split('T')[0];
+  const sessionIdShort = session.id.substring(0, 8);
+  const filename = `${date}_${sessionIdShort}.md`;
+  const notePath = path.join(sessionsDir, filename);
+
+  // Calculate duration
+  const durationMinutes = session.durationMinutes || 0;
+  const durationStr = durationMinutes > 60
+    ? `${Math.floor(durationMinutes / 60)}h ${durationMinutes % 60}m`
+    : `${durationMinutes}m`;
+
+  // Build frontmatter
+  const sanitizedProject = sanitizeProjectName(session.project);
+  const frontmatter = {
+    type: 'session',
+    title: `Session ${sessionIdShort}`,
+    project: session.project,
+    created: session.startTime,
+    ended: session.endTime || new Date().toISOString(),
+    duration_minutes: durationMinutes,
+    status: session.status,
+    files_modified: session.filesModified.length,
+    commands_run: session.commandsRun,
+    errors_encountered: session.errorsEncountered,
+    exploration_count: exploration.exploration_count,
+    parent: `[[${memFolder}/projects/${sanitizedProject}/${sanitizedProject}]]`,
+  };
+
+  // Build content
+  const contentSections: string[] = [];
+
+  // Summary section
+  contentSections.push(`# Session ${sessionIdShort}\n`);
+  contentSections.push(`**Project**: ${session.project}`);
+  contentSections.push(`**Duration**: ${durationStr}`);
+  contentSections.push(`**Date**: ${date}\n`);
+
+  // Files modified
+  if (session.filesModified.length > 0) {
+    contentSections.push(`## Files Modified (${session.filesModified.length})\n`);
+    contentSections.push(session.filesModified.slice(0, 20).map(f => `- ${f}`).join('\n'));
+    if (session.filesModified.length > 20) {
+      contentSections.push(`\n... and ${session.filesModified.length - 20} more files`);
+    }
+    contentSections.push('');
+  }
+
+  // Codebase exploration
+  if (exploration.exploration_count > 0) {
+    contentSections.push(`## Codebase Exploration\n`);
+
+    if (exploration.files_read.length > 0) {
+      contentSections.push(`### Files Examined (${exploration.files_read.length})`);
+      contentSections.push(exploration.files_read.slice(0, 15).map(f => `- ${f}`).join('\n'));
+      if (exploration.files_read.length > 15) {
+        contentSections.push(`... and ${exploration.files_read.length - 15} more files`);
+      }
+      contentSections.push('');
+    }
+
+    if (exploration.patterns_searched.length > 0) {
+      contentSections.push(`### Search Patterns (${exploration.patterns_searched.length})`);
+      contentSections.push(exploration.patterns_searched.slice(0, 10).map(p => `- \`${p}\``).join('\n'));
+      if (exploration.patterns_searched.length > 10) {
+        contentSections.push(`... and ${exploration.patterns_searched.length - 10} more patterns`);
+      }
+      contentSections.push('');
+    }
+
+    if (exploration.globs_matched.length > 0) {
+      contentSections.push(`### Glob Patterns (${exploration.globs_matched.length})`);
+      contentSections.push(exploration.globs_matched.slice(0, 10).map(p => `- \`${p}\``).join('\n'));
+      contentSections.push('');
+    }
+  }
+
+  // Session statistics
+  contentSections.push(`## Statistics\n`);
+  contentSections.push(`- Commands run: ${session.commandsRun}`);
+  contentSections.push(`- Errors encountered: ${session.errorsEncountered}`);
+  contentSections.push(`- Exploration actions: ${exploration.exploration_count}`);
+
+  // Build final content with YAML frontmatter
+  const yamlFrontmatter = Object.entries(frontmatter)
+    .map(([key, value]) => {
+      if (typeof value === 'string') {
+        return `${key}: "${value}"`;
+      }
+      return `${key}: ${value}`;
+    })
+    .join('\n');
+
+  const fullContent = `---\n${yamlFrontmatter}\n---\n\n${contentSections.join('\n')}`;
+
+  // Write the note
+  fs.writeFileSync(notePath, fullContent, 'utf-8');
+  logger.info(`Created session summary note: ${filename}`);
 }
 
 main();

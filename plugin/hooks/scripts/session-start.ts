@@ -24,7 +24,7 @@ async function main() {
     const project = await getProjectInfo(input.cwd);
 
     if (!project) {
-      logger.error('Cannot determine project from cwd', { cwd: input.cwd });
+      logger.info('Cannot determine project from cwd', { cwd: input.cwd });
       return;
     }
 
@@ -70,7 +70,7 @@ async function main() {
     const legacyKnowledgeFolder = path.join(projectPath, 'knowledge');
     const legacyFilesFolder = path.join(projectPath, 'files');
     if (fs.existsSync(legacyKnowledgeFolder) || fs.existsSync(legacyFilesFolder)) {
-      logger.warn('Legacy folders detected (knowledge/ or files/). Please migrate files to research/ or patterns/', {
+      logger.info('Legacy folders detected (knowledge/ or files/). Please migrate files to research/ or patterns/', {
         knowledge_exists: fs.existsSync(legacyKnowledgeFolder),
         files_exists: fs.existsSync(legacyFilesFolder),
       });
