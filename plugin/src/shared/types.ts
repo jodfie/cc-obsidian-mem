@@ -280,10 +280,21 @@ export interface PostToolUseInput {
   cwd: string;
   tool_name: string;
   tool_input: Record<string, unknown>;
+  /**
+   * Tool response structure varies by tool:
+   * - Some tools return { content: [{ type: 'text', text: '...' }] }
+   * - Read tool returns { type: '...', file: '...' }
+   * - Some return { output: '...' } or { text: '...' }
+   * - $CLAUDE_TOOL_OUTPUT env var also available for PostToolUse events
+   */
   tool_response: {
-    content: Array<{ type: string; text?: string }>;
+    content?: Array<{ type: string; text?: string }> | string;
     isError?: boolean;
+    // Tool-specific fields (Read, Grep, etc. may have different structures)
+    [key: string]: unknown;
   };
+  /** Some hooks provide tool_result directly on input */
+  tool_result?: string;
 }
 
 export interface SessionEndInput {

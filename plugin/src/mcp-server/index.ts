@@ -4,14 +4,28 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import * as z from "zod";
 import { VaultManager } from "./utils/vault.js";
-import { loadConfig, getProjectPath } from "../shared/config.js";
+import { loadConfig, getProjectPath, sanitizeProjectName } from "../shared/config.js";
 import { createLogger } from "../shared/logger.js";
 import type { SearchResult, ProjectContext, Note } from "../shared/types.js";
+import type {
+  IssueCategory,
+} from "../shared/audit-types.js";
 import {
   generateProjectCanvases,
   detectFolder,
   type CanvasNote,
 } from "./utils/canvas.js";
+import { AuditEngine } from "./utils/audit-engine.js";
+import { FixEngine } from "./utils/fix-engine.js";
+import { ContentValidator } from "./utils/content-validator.js";
+import {
+  formatSearchResults,
+  formatNote,
+  formatProjectContext,
+  formatAuditResult,
+  formatFixResults,
+  formatValidationResult,
+} from "./utils/formatters.js";
 import * as path from "path";
 
 type TextContent = { type: "text"; text: string };
@@ -676,107 +690,244 @@ async function main() {
     }
   );
 
+  // Tool: mem_audit - Audit knowledge base for issues
+  server.registerTool(
+    "mem_audit",
+    {
+      title: "Audit Memory",
+      description:
+        "Scan the knowledge base for structural issues (broken links, orphan notes, missing indexes, etc.). " +
+        "Optionally includes AI-powered content validation for staleness detection.",
+      inputSchema: {
+        project: z
+          .string()
+          .optional()
+          .describe("Project to audit (auto-detected if only one project exists)"),
+        includeContentValidation: z
+          .boolean()
+          .default(false)
+          .describe("Include AI-powered content staleness detection (slower)"),
+        categories: z
+          .array(z.enum([
+            "broken_link",
+            "orphan_note",
+            "missing_index",
+            "supersession_inconsistent",
+            "index_stale",
+            "invalid_frontmatter",
+          ]))
+          .optional()
+          .describe("Specific issue categories to check (default: all structural)"),
+        maxContentNotes: z
+          .number()
+          .int()
+          .min(1)
+          .max(100)
+          .default(20)
+          .describe("Maximum notes to validate for content staleness"),
+      },
+    },
+    async ({ project, includeContentValidation, categories, maxContentNotes }): Promise<ToolResult> => {
+      logger.debug('mem_audit called', { project, includeContentValidation, categories, maxContentNotes });
+      try {
+        // Auto-detect project if not specified
+        const targetProject = await resolveProject(project, vault);
+        if (!targetProject) {
+          return {
+            content: [{
+              type: "text",
+              text: "Multiple projects found. Please specify a project name. Use mem_list_projects to see available projects.",
+            }],
+            isError: true,
+          };
+        }
+
+        const auditEngine = new AuditEngine(config.vault.path, config.vault.memFolder);
+        const result = await auditEngine.audit({
+          project: targetProject,
+          includeContentValidation,
+          categories: categories as IssueCategory[] | undefined,
+          maxContentNotes,
+        });
+
+        // Run content validation if requested
+        if (includeContentValidation) {
+          const contentValidator = new ContentValidator(
+            config.vault.path,
+            config.vault.memFolder
+          );
+          result.contentValidation = await contentValidator.validate({
+            project: targetProject,
+            limit: maxContentNotes,
+          });
+        }
+
+        const output = formatAuditResult(result);
+        return {
+          content: [{ type: "text", text: output }],
+        };
+      } catch (error) {
+        return {
+          content: [{ type: "text", text: `Audit failed: ${error}` }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // Tool: mem_fix - Fix issues in knowledge base
+  server.registerTool(
+    "mem_fix",
+    {
+      title: "Fix Memory Issues",
+      description:
+        "Apply fixes for issues detected by mem_audit. Supports dry-run mode to preview changes. " +
+        "Only auto-fixable issues are applied by default unless specific issueIds are provided.",
+      inputSchema: {
+        project: z.string().describe("Project to fix"),
+        issueIds: z
+          .array(z.string())
+          .optional()
+          .describe("Specific issue IDs to fix (from mem_audit)"),
+        fixCategories: z
+          .array(z.enum([
+            "broken_link",
+            "orphan_note",
+            "missing_index",
+            "supersession_inconsistent",
+            "index_stale",
+            "invalid_frontmatter",
+          ]))
+          .optional()
+          .describe("Fix all issues in these categories"),
+        dryRun: z
+          .boolean()
+          .default(false)
+          .describe("Preview changes without applying them"),
+        rebuildIndexes: z
+          .boolean()
+          .default(false)
+          .describe("Rebuild all project indexes after fixes"),
+      },
+    },
+    async ({ project, issueIds, fixCategories, dryRun, rebuildIndexes }): Promise<ToolResult> => {
+      logger.debug('mem_fix called', { project, issueIds, fixCategories, dryRun, rebuildIndexes });
+      try {
+        // First run audit to get current issues
+        const auditEngine = new AuditEngine(config.vault.path, config.vault.memFolder);
+        const auditResult = await auditEngine.audit({
+          project,
+          categories: fixCategories as IssueCategory[] | undefined,
+        });
+
+        if (auditResult.issues.length === 0) {
+          return {
+            content: [{ type: "text", text: "No issues found to fix." }],
+          };
+        }
+
+        // Apply fixes
+        const fixEngine = new FixEngine(config.vault.path, config.vault.memFolder);
+        const results = await fixEngine.applyFixes(auditResult.issues, {
+          project,
+          issueIds,
+          fixCategories: fixCategories as IssueCategory[] | undefined,
+          dryRun,
+          rebuildIndexes,
+        });
+
+        const output = formatFixResults(results, dryRun);
+        return {
+          content: [{ type: "text", text: output }],
+        };
+      } catch (error) {
+        return {
+          content: [{ type: "text", text: `Fix operation failed: ${error}` }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // Tool: mem_validate - Validate content for staleness
+  server.registerTool(
+    "mem_validate",
+    {
+      title: "Validate Memory Content",
+      description:
+        "AI-powered validation of knowledge notes against current codebase. " +
+        "Detects stale content by comparing documented knowledge with actual files.",
+      inputSchema: {
+        project: z.string().describe("Project to validate"),
+        noteType: z
+          .enum(["qa", "explanation", "decision", "research", "learning"])
+          .optional()
+          .describe("Only validate notes of this type (e.g., 'qa', 'decision')"),
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(100)
+          .default(20)
+          .describe("Maximum notes to validate"),
+        confidenceThreshold: z
+          .number()
+          .min(0)
+          .max(1)
+          .default(0.7)
+          .describe("Minimum confidence threshold for staleness (0-1)"),
+      },
+    },
+    async ({ project, noteType, limit, confidenceThreshold }): Promise<ToolResult> => {
+      logger.debug('mem_validate called', { project, noteType, limit, confidenceThreshold });
+      try {
+        const contentValidator = new ContentValidator(
+          config.vault.path,
+          config.vault.memFolder
+        );
+
+        const result = await contentValidator.validate({
+          project,
+          noteType,
+          limit,
+          confidenceThreshold,
+        });
+
+        const output = formatValidationResult(result);
+        return {
+          content: [{ type: "text", text: output }],
+        };
+      } catch (error) {
+        return {
+          content: [{ type: "text", text: `Validation failed: ${error}` }],
+          isError: true,
+        };
+      }
+    }
+  );
+
   // Connect via stdio
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
 
-// Formatting functions
-
-function formatSearchResults(results: SearchResult[]): string {
-  if (results.length === 0) {
-    return "No results found.";
+/**
+ * Resolve project name from optional input
+ * - If provided, validate and return
+ * - If not provided, auto-detect if only one project exists
+ * - Returns null if multiple projects and none specified
+ */
+async function resolveProject(project: string | undefined, vault: VaultManager): Promise<string | null> {
+  if (project) {
+    return sanitizeProjectName(project);
   }
 
-  const lines: string[] = [`## Search Results (${results.length})\n`];
-
-  for (const result of results) {
-    lines.push(`### ${result.title}`);
-    lines.push(`**Type**: ${result.type} | **Path**: \`${result.path}\``);
-    if (result.metadata.project) {
-      lines.push(`**Project**: ${result.metadata.project}`);
-    }
-    if (result.metadata.tags && result.metadata.tags.length > 0) {
-      lines.push(
-        `**Tags**: ${result.metadata.tags.map((t) => `#${t}`).join(" ")}`
-      );
-    }
-    if (result.snippet) {
-      lines.push("");
-      lines.push(`> ${result.snippet}`);
-    }
-    lines.push("");
+  const projects = await vault.listProjects();
+  if (projects.length === 1) {
+    return projects[0];
   }
 
-  return lines.join("\n");
-}
-
-function formatNote(note: Note): string {
-  const lines: string[] = [];
-
-  lines.push(`# ${note.title}`);
-  lines.push("");
-  lines.push(`**Path**: \`${note.path}\``);
-  lines.push(`**Type**: ${note.frontmatter.type}`);
-  if (note.frontmatter.project) {
-    lines.push(`**Project**: ${note.frontmatter.project}`);
-  }
-  if (note.frontmatter.tags.length > 0) {
-    lines.push(
-      `**Tags**: ${note.frontmatter.tags.map((t) => `#${t}`).join(" ")}`
-    );
-  }
-  lines.push("");
-  lines.push("---");
-  lines.push("");
-  lines.push(note.content);
-
-  return lines.join("\n");
-}
-
-function formatProjectContext(context: ProjectContext): string {
-  const lines: string[] = [];
-
-  lines.push(`# Project: ${context.project}`);
-  lines.push("");
-
-  if (context.summary) {
-    lines.push("## Summary");
-    lines.push(context.summary);
-    lines.push("");
-  }
-
-  if (context.unresolvedErrors.length > 0) {
-    lines.push("## Unresolved Errors");
-    lines.push("");
-    for (const error of context.unresolvedErrors) {
-      lines.push(`> [!danger] ${error.type}`);
-      lines.push(`> ${error.message}`);
-      lines.push(`> Last seen: ${error.lastSeen}`);
-      lines.push("");
-    }
-  }
-
-  if (context.activeDecisions.length > 0) {
-    lines.push("## Active Decisions");
-    lines.push("");
-    for (const decision of context.activeDecisions) {
-      lines.push(`### ${decision.title}`);
-      lines.push(decision.decision);
-      lines.push("");
-    }
-  }
-
-  if (context.patterns.length > 0) {
-    lines.push("## Relevant Patterns");
-    lines.push("");
-    for (const pattern of context.patterns) {
-      lines.push(`- **${pattern.name}**: ${pattern.description}`);
-    }
-    lines.push("");
-  }
-
-  return lines.join("\n");
+  return null;
 }
 
 main().catch((error) => {

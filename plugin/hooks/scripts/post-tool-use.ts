@@ -25,7 +25,31 @@ async function main() {
     const config = loadConfig();
     const logger = createLogger('post-tool-use', input.session_id);
 
-    logger.debug('Post-tool-use hook triggered', { tool: input.tool_name, isError: input.tool_response.isError });
+    // DEBUG: Log the actual input structure for exploration tools
+    if (EXPLORATION_TOOLS.has(input.tool_name)) {
+      const envOutput = process.env.CLAUDE_TOOL_OUTPUT;
+      const resp = input.tool_response as any;
+      logger.debug('Exploration tool raw input', {
+        tool: input.tool_name,
+        hasToolResponse: !!input.tool_response,
+        toolResponseKeys: input.tool_response ? Object.keys(input.tool_response) : [],
+        // Tool-specific fields
+        hasFilenames: Array.isArray(resp?.filenames),
+        filenamesCount: Array.isArray(resp?.filenames) ? resp.filenames.length : 0,
+        hasMatches: Array.isArray(resp?.matches),
+        hasFiles: Array.isArray(resp?.files),
+        // Standard fields
+        contentType: resp?.content ? typeof resp.content : 'undefined',
+        isContentArray: Array.isArray(resp?.content),
+        // Also check for tool_result which docs mention
+        hasToolResult: !!(input as any).tool_result,
+        // Check environment variable
+        hasEnvOutput: !!envOutput,
+        envOutputLength: envOutput?.length ?? 0,
+      });
+    }
+
+    logger.debug('Post-tool-use hook triggered', { tool: input.tool_name, isError: input.tool_response?.isError });
 
     // Validate session_id from input
     if (!input.session_id) {
@@ -141,14 +165,11 @@ async function processKnowledgeTool(
     return;
   }
 
-  // Extract tool output text
-  const outputText = input.tool_response.content
-    .filter(c => c.type === 'text' && c.text)
-    .map(c => c.text)
-    .join('\n');
+  // Extract tool output text using flexible extractor
+  const outputText = getToolOutputText(input.tool_response, input);
 
   if (!outputText || outputText.length < 100) {
-    logger.debug('Output too short for knowledge extraction', { length: outputText.length });
+    logger.debug('Output too short for knowledge extraction', { length: outputText?.length ?? 0 });
     return;
   }
 
@@ -661,12 +682,51 @@ function sanitizePath(absolutePath: string, projectPath: string): string | null 
 
 /**
  * Extract text content from tool response
+ * Handles different response structures: content array, direct string, tool_result field, or env var
+ *
+ * Claude Code hooks provide tool output in multiple ways:
+ * 1. content array (standard API format): { content: [{ type: 'text', text: '...' }] }
+ * 2. Direct string content: { content: '...' }
+ * 3. tool_result field on input
+ * 4. $CLAUDE_TOOL_OUTPUT environment variable (PostToolUse only)
+ * 5. Response may also have type-specific fields like 'file', 'matches', etc.
  */
-function getToolOutputText(response: PostToolUseInput['tool_response']): string {
-  return response.content
-    .filter(c => c.type === 'text' && c.text)
-    .map(c => c.text)
-    .join('\n');
+function getToolOutputText(response: PostToolUseInput['tool_response'], input?: PostToolUseInput): string {
+  // Handle content array (standard API format)
+  if (response?.content && Array.isArray(response.content)) {
+    return response.content
+      .filter(c => c.type === 'text' && c.text)
+      .map(c => c.text)
+      .join('\n');
+  }
+
+  // Handle direct string content
+  if (typeof response?.content === 'string') {
+    return response.content;
+  }
+
+  // Check for tool_result field (documented in Claude Code hooks)
+  if (input && typeof (input as any).tool_result === 'string') {
+    return (input as any).tool_result;
+  }
+
+  // Try $CLAUDE_TOOL_OUTPUT environment variable (available for PostToolUse events)
+  const envOutput = process.env.CLAUDE_TOOL_OUTPUT;
+  if (envOutput) {
+    return envOutput;
+  }
+
+  // Handle response with 'output' field (some tools use this)
+  if (response && typeof (response as any).output === 'string') {
+    return (response as any).output;
+  }
+
+  // Handle response with 'text' field directly
+  if (response && typeof (response as any).text === 'string') {
+    return (response as any).text;
+  }
+
+  return '';
 }
 
 /**
@@ -699,13 +759,39 @@ function extractExplorationData(
         const pattern = toolInput.pattern as string | undefined;
         if (!pattern) return null;
 
-        // Extract file paths from grep output (format: "path/to/file:line_number:...")
-        const outputText = getToolOutputText(toolResponse);
         const uniquePaths = new Set<string>();
 
-        for (const match of outputText.matchAll(/^([^:]+):\d+:/gm)) {
-          const sanitized = match[1] ? sanitizePath(match[1], projectPath) : null;
-          if (sanitized) uniquePaths.add(sanitized);
+        // Try to get file matches from response structure first
+        // Claude Code might return matches in a structured format
+        const matches = (toolResponse as any).matches as Array<{ file: string }> | undefined;
+        const files = (toolResponse as any).files as string[] | undefined;
+
+        if (Array.isArray(matches)) {
+          for (const match of matches) {
+            if (match.file) {
+              const sanitized = sanitizePath(match.file, projectPath);
+              if (sanitized) uniquePaths.add(sanitized);
+            }
+          }
+          logger.debug('Grep extracted from matches field', { count: uniquePaths.size });
+        } else if (Array.isArray(files)) {
+          for (const file of files) {
+            const sanitized = sanitizePath(file, projectPath);
+            if (sanitized) uniquePaths.add(sanitized);
+          }
+          logger.debug('Grep extracted from files field', { count: uniquePaths.size });
+        } else {
+          // Fallback: Extract file paths from text output (format: "path/to/file:line_number:...")
+          const outputText = getToolOutputText(toolResponse, input);
+          if (outputText) {
+            for (const match of outputText.matchAll(/^([^:]+):\d+:/gm)) {
+              const sanitized = match[1] ? sanitizePath(match[1], projectPath) : null;
+              if (sanitized) uniquePaths.add(sanitized);
+            }
+            logger.debug('Grep extracted from text output', { count: uniquePaths.size });
+          } else {
+            logger.debug('Grep: no matches, files, or text output available');
+          }
         }
 
         return {
@@ -720,13 +806,31 @@ function extractExplorationData(
         const pattern = toolInput.pattern as string | undefined;
         if (!pattern) return null;
 
-        const outputText = getToolOutputText(toolResponse);
-        const paths = outputText
-          .split('\n')
-          .map(line => line.trim())
-          .filter(Boolean)
-          .map(line => sanitizePath(line, projectPath))
-          .filter((p): p is string => p !== null);
+        // Claude Code returns filenames directly in tool_response.filenames array
+        const filenames = (toolResponse as any).filenames as string[] | undefined;
+        let paths: string[] = [];
+
+        if (Array.isArray(filenames)) {
+          // Use the filenames array directly from the response
+          paths = filenames
+            .map(f => sanitizePath(f, projectPath))
+            .filter((p): p is string => p !== null);
+          logger.debug('Glob extracted from filenames field', { count: paths.length });
+        } else {
+          // Fallback: try to parse text output (for compatibility)
+          const outputText = getToolOutputText(toolResponse, input);
+          if (outputText) {
+            paths = outputText
+              .split('\n')
+              .map(line => line.trim())
+              .filter(Boolean)
+              .map(line => sanitizePath(line, projectPath))
+              .filter((p): p is string => p !== null);
+            logger.debug('Glob extracted from text output', { count: paths.length });
+          } else {
+            logger.debug('Glob: no filenames or text output available');
+          }
+        }
 
         return {
           action: 'glob',

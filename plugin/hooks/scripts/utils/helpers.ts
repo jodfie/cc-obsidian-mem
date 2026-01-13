@@ -161,12 +161,53 @@ export function isSignificantAction(input: PostToolUseInput): boolean {
   return false;
 }
 
+/** Flexible response type that handles various Claude Code hook response structures */
+type FlexibleToolResponse = {
+  content?: Array<{ type: string; text?: string }> | string;
+  isError?: boolean;
+  [key: string]: unknown;
+};
+
+/**
+ * Extract text from flexible tool response structure
+ */
+function extractResponseText(response: FlexibleToolResponse): string {
+  // Handle content array (standard API format)
+  if (response.content && Array.isArray(response.content)) {
+    return response.content
+      .filter(c => c.type === 'text' && c.text)
+      .map(c => c.text)
+      .join('\n');
+  }
+
+  // Handle direct string content
+  if (typeof response.content === 'string') {
+    return response.content;
+  }
+
+  // Try $CLAUDE_TOOL_OUTPUT environment variable
+  const envOutput = process.env.CLAUDE_TOOL_OUTPUT;
+  if (envOutput) {
+    return envOutput;
+  }
+
+  // Handle response with 'output' or 'text' field
+  if (typeof response.output === 'string') {
+    return response.output;
+  }
+  if (typeof response.text === 'string') {
+    return response.text;
+  }
+
+  return '';
+}
+
 /**
  * Extract file info from a tool use
  */
 export function extractFileInfo(
   input: Record<string, unknown>,
-  response: { content: Array<{ type: string; text?: string }>; isError?: boolean }
+  response: FlexibleToolResponse
 ): {
   path: string;
   language: string;
@@ -180,11 +221,7 @@ export function extractFileInfo(
 
   // Determine change type from response
   let changeType: 'create' | 'modify' | 'delete' = 'modify';
-  const responseText = response.content
-    .filter(c => c.type === 'text')
-    .map(c => c.text)
-    .join(' ')
-    .toLowerCase();
+  const responseText = extractResponseText(response).toLowerCase();
 
   if (responseText.includes('created')) {
     changeType = 'create';
@@ -204,7 +241,7 @@ export function extractFileInfo(
  */
 export function extractCommandInfo(
   input: Record<string, unknown>,
-  response: { content: Array<{ type: string; text?: string }>; isError?: boolean },
+  response: FlexibleToolResponse,
   bashOutputConfig?: { enabled: boolean; maxLength: number }
 ): {
   command: string;
@@ -213,10 +250,7 @@ export function extractCommandInfo(
   isError: boolean;
 } {
   const command = (input.command as string) || '';
-  const rawOutput = response.content
-    .filter(c => c.type === 'text')
-    .map(c => c.text)
-    .join('\n');
+  const rawOutput = extractResponseText(response);
 
   // Try to extract exit code from output
   let exitCode = response.isError ? 1 : 0;
@@ -243,17 +277,14 @@ export function extractCommandInfo(
 export function extractErrorInfo(
   toolName: string,
   input: Record<string, unknown>,
-  response: { content: Array<{ type: string; text?: string }>; isError?: boolean }
+  response: FlexibleToolResponse
 ): {
   type: string;
   message: string;
   file?: string;
   context?: string;
 } {
-  const output = response.content
-    .filter(c => c.type === 'text')
-    .map(c => c.text)
-    .join('\n');
+  const output = extractResponseText(response);
 
   // Try to extract error type and message
   let type = 'UnknownError';

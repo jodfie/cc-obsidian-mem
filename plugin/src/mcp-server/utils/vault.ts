@@ -181,6 +181,23 @@ SORT created DESC
   }
 
   /**
+   * Public wrapper for createCategoryIndex
+   * Used by FixEngine to create missing index files
+   */
+  async createCategoryIndexPublic(projectName: string, category: string): Promise<void> {
+    const sanitized = sanitizeProjectName(projectName);
+    const projectPath = path.join(this.getMemPath(), PROJECTS_FOLDER, sanitized);
+
+    // Ensure category directory exists
+    const categoryPath = path.join(projectPath, category);
+    if (!fs.existsSync(categoryPath)) {
+      fs.mkdirSync(categoryPath, { recursive: true });
+    }
+
+    await this.createCategoryIndex(projectName, category, projectPath);
+  }
+
+  /**
    * Create a project index file with Dataview queries
    */
   private async createProjectIndex(projectName: string, projectPath: string): Promise<void> {
