@@ -63,10 +63,10 @@ When releasing a new version, update the version number in **all four files**:
 
 | File                                | Field                | Example              |
 | ----------------------------------- | -------------------- | -------------------- |
-| `plugin/package.json`               | `version`            | `"version": "0.6.0"` |
-| `plugin/.claude-plugin/plugin.json` | `version`            | `"version": "0.6.0"` |
-| `.claude-plugin/marketplace.json`   | `plugins[0].version` | `"version": "0.6.0"` |
-| `plugin/src/mcp-server/index.ts`    | `version`            | `version: "0.6.0"`   |
+| `plugin/package.json`               | `version`            | `"version": "1.0.0"` |
+| `plugin/.claude-plugin/plugin.json` | `version`            | `"version": "1.0.0"` |
+| `.claude-plugin/marketplace.json`   | `plugins[0].version` | `"version": "1.0.0"` |
+| `plugin/src/mcp-server/index.ts`    | `version`            | `version: "1.0.0"`   |
 
 ### Project Structure
 
@@ -220,10 +220,10 @@ To configure knowledge extraction frequency, add to `~/.cc-obsidian-mem/config.j
 }
 ```
 
-| Option             | Values                      | Description                                          |
-| ------------------ | --------------------------- | ---------------------------------------------------- |
+| Option             | Values                        | Description                                         |
+| ------------------ | ----------------------------- | --------------------------------------------------- |
 | `frequency`        | `"compact-only"`/`"periodic"` | When to extract knowledge (default: `compact-only`) |
-| `periodicInterval` | number (minutes)            | Interval for periodic extraction (default: `10`)     |
+| `periodicInterval` | number (minutes)              | Interval for periodic extraction (default: `10`)    |
 
 - `compact-only` - Only extract knowledge when `/compact` is run (recommended)
 - `periodic` - Extract knowledge every N minutes during active sessions

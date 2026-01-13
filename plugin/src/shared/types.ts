@@ -1,305 +1,391 @@
 /**
- * Configuration types for cc-obsidian-mem
+ * TypeScript type definitions for cc-obsidian-mem v2
+ * SQLite + Obsidian architecture
  */
+
+// ============================================================================
+// Configuration Types
+// ============================================================================
 
 export interface Config {
-  vault: {
-    path: string;
-    memFolder: string;
-  };
-  capture: {
-    fileEdits: boolean;
-    bashCommands: boolean;
-    bashOutput: {
-      enabled: boolean;
-      maxLength: number;
-    };
-    errors: boolean;
-    decisions: boolean;
-  };
-  summarization: {
-    enabled: boolean;
-    model: string; // Agent SDK model: 'sonnet', 'opus', 'haiku', or full model ID
-    sessionSummary: boolean;
-    errorSummary: boolean;
-    /** Timeout in milliseconds for claude -p summarization (default: 180000 = 3 minutes) */
-    timeout?: number;
-  };
-  contextInjection: {
-    enabled: boolean;
-    maxTokens: number;
-    includeRelatedErrors: boolean;
-    includeProjectPatterns: boolean;
-  };
-  canvas?: CanvasConfig;
-  logging?: LoggingConfig;
-  processing?: ProcessingConfig;
+	vault: {
+		path: string;
+		memFolder?: string;
+	};
+	sqlite: {
+		path?: string;
+		retention?: {
+			sessions?: number;
+			orphan_timeout_hours?: number;
+			file_reads_per_file?: number;
+		};
+		max_output_size?: number;
+	};
+	logging?: {
+		verbose?: boolean;
+		logDir?: string;
+	};
+	canvas?: {
+		enabled?: boolean;
+		autoGenerate?: boolean;
+		updateStrategy?: "always" | "skip";
+	};
+	defaultProject?: string;
 }
 
-/**
- * Logging configuration for debug/verbose output
- */
-export interface LoggingConfig {
-  /** Enable verbose debug logging (default: false) */
-  verbose: boolean;
-  /** Custom log directory (default: os.tmpdir()) */
-  logDir?: string;
-}
-
-/**
- * Canvas configuration for visualization generation
- */
-export interface CanvasConfig {
-  /** Master switch - canvas generation is OFF by default */
-  enabled: boolean;
-  /** Auto-generate canvases on mem_project_context (default: false) */
-  autoGenerate: boolean;
-  /** Update strategy: 'overwrite' | 'append' | 'skip' (default: 'skip') */
-  updateStrategy: 'overwrite' | 'append' | 'skip';
-}
-
-/**
- * Processing configuration for knowledge extraction
- */
-export interface ProcessingConfig {
-  /** Knowledge extraction frequency */
-  frequency: 'compact-only' | 'periodic';
-  /** Interval in minutes for periodic extraction (default: 10) */
-  periodicInterval?: number;
-}
-
-/**
- * Session types
- */
+// ============================================================================
+// Database Record Types
+// ============================================================================
 
 export interface Session {
-  id: string;
-  project: string;
-  projectPath: string;
-  startTime: string;
-  endTime?: string;
-  durationMinutes?: number;
-  status: 'active' | 'completed' | 'stopped';
-  observations: Observation[];
-  summary?: string;
-  filesModified: string[];
-  commandsRun: number;
-  errorsEncountered: number;
-  /** Knowledge paths captured during pre-compact, to be linked at session end */
-  preCompactKnowledge?: string[];
-  /** Exploration summary for this session */
-  exploration?: SessionExploration;
-  /** Topics covered in this session */
-  topics?: string[];
-  /** Session summary text */
-  sessionSummary?: string;
+	id: number;
+	session_id: string;
+	project: string;
+	started_at: string;
+	started_at_epoch: number;
+	completed_at: string | null;
+	completed_at_epoch: number | null;
+	status: "active" | "completed" | "failed";
 }
+
+export interface UserPrompt {
+	id: number;
+	session_id: string;
+	prompt_number: number;
+	prompt_text: string;
+	created_at: string;
+	created_at_epoch: number;
+}
+
+export interface ToolUse {
+	id: number;
+	session_id: string;
+	prompt_number: number;
+	tool_name: string;
+	tool_input: string;
+	tool_output: string;
+	tool_output_truncated: number;
+	tool_output_hash: string | null;
+	duration_ms: number | null;
+	cwd: string | null;
+	created_at: string;
+	created_at_epoch: number;
+}
+
+export interface FileRead {
+	id: number;
+	session_id: string;
+	file_path: string;
+	content_hash: string;
+	content_snippet: string | null;
+	line_count: number | null;
+	created_at: string;
+	created_at_epoch: number;
+}
+
+export interface SessionSummary {
+	id: number;
+	session_id: string;
+	project: string;
+	request: string | null;
+	investigated: string | null;
+	learned: string | null;
+	completed: string | null;
+	next_steps: string | null;
+	written_to_vault: number;
+	written_notes: string | null;
+	error_message: string | null;
+	created_at: string;
+	created_at_epoch: number;
+}
+
+// ============================================================================
+// Hook Payload Types
+// ============================================================================
+
+export interface SessionStartPayload {
+	sessionId: string;
+	cwd: string;
+}
+
+export interface UserPromptSubmitPayload {
+	sessionId: string;
+	promptNumber: number;
+	promptText: string;
+}
+
+export interface PostToolUsePayload {
+	sessionId: string;
+	promptNumber: number;
+	toolName: string;
+	toolInput: string;
+	toolOutput: string;
+	durationMs?: number;
+	cwd?: string;
+}
+
+export interface StopPayload {
+	sessionId: string;
+}
+
+// ============================================================================
+// MCP Tool Types
+// ============================================================================
+
+export interface MemSearchArgs {
+	query: string;
+	type?: "error" | "decision" | "pattern" | "file" | "learning" | "knowledge";
+	limit?: number;
+}
+
+export interface MemReadArgs {
+	path: string;
+	section?: string;
+}
+
+export interface MemWriteArgs {
+	type: "error" | "decision" | "pattern" | "file" | "learning";
+	title: string;
+	content: string;
+	project?: string;
+	tags?: string[];
+	status?: "active" | "superseded" | "draft";
+}
+
+export interface MemSupersedeArgs {
+	oldNotePath: string;
+	type: "error" | "decision" | "pattern" | "file" | "learning";
+	title: string;
+	content: string;
+	project?: string;
+	tags?: string[];
+}
+
+export interface MemProjectContextArgs {
+	project: string;
+	includeErrors?: boolean;
+	includeDecisions?: boolean;
+	includePatterns?: boolean;
+	generateCanvas?: boolean;
+}
+
+// ============================================================================
+// Observation Types (Real-time SDK extraction)
+// ============================================================================
+
+export type ObservationType =
+	| "decision"
+	| "bugfix"
+	| "feature"
+	| "refactor"
+	| "discovery"
+	| "change"
+	| "error"
+	| "pattern";
 
 export interface Observation {
-  id: string;
-  timestamp: string;
-  type: ObservationType;
-  tool: string;
-  isError: boolean;
-  data: FileEditData | CommandData | ErrorData | Record<string, unknown>;
+	id: number;
+	session_id: string;
+	project: string;
+	type: ObservationType;
+	title: string;
+	subtitle: string | null;
+	facts: string | null; // JSON array as string
+	concepts: string | null; // JSON array as string
+	narrative: string | null;
+	files_read: string | null; // JSON array as string
+	files_modified: string | null; // JSON array as string
+	discovery_tokens: number | null;
+	created_at: string;
+	created_at_epoch: number;
 }
 
-export type ObservationType = 'file_edit' | 'command' | 'error' | 'decision' | 'exploration' | 'other';
-
-export interface FileEditData {
-  path: string;
-  language: string;
-  changeType: 'create' | 'modify' | 'delete';
-  linesAdded?: number;
-  linesRemoved?: number;
-  summary?: string;
+export interface ParsedObservation {
+	type: ObservationType;
+	title: string;
+	subtitle?: string;
+	facts: string[];
+	concepts: string[];
+	narrative?: string;
+	files_read: string[];
+	files_modified: string[];
 }
 
-export interface CommandData {
-  command: string;
-  exitCode: number;
-  output?: string;
-  duration?: number;
+// ============================================================================
+// Pending Message Types (Claim-and-delete queue)
+// ============================================================================
+
+export type PendingMessageType = "tool_use" | "prompt" | "summary_request";
+
+export interface PendingMessage {
+	id: number;
+	session_id: string;
+	message_type: PendingMessageType;
+	payload: string; // JSON serialized
+	claimed_at: string | null;
+	claimed_at_epoch: number | null;
+	created_at: string;
+	created_at_epoch: number;
 }
 
-export interface ErrorData {
-  type: string;
-  message: string;
-  stack?: string;
-  file?: string;
-  line?: number;
-  context?: string;
-  resolution?: string;
+// ============================================================================
+// Mode Configuration Types (Pluggable observation types)
+// ============================================================================
+
+export interface ObservationTypeConfig {
+	id: ObservationType;
+	label: string;
+	description: string;
+	emoji: string;
 }
 
-/**
- * Exploration data types for tracking codebase navigation
- */
-
-export interface ExplorationData {
-  action: 'read' | 'search' | 'glob';
-  paths?: string[];           // Files read or matched (project-relative)
-  patterns?: string[];        // Search patterns used
-  query?: string;             // For Grep: the pattern
-  results_count?: number;     // Number of results
+export interface ConceptConfig {
+	id: string;
+	label: string;
+	description: string;
 }
 
-export interface SessionExploration {
-  files_read: string[];       // Unique file paths read
-  patterns_searched: string[];// Search patterns used
-  globs_matched: string[];    // Glob patterns used
-  exploration_count: number;  // Total exploration actions
+export interface ModePrompts {
+	system_identity: string;
+	observer_role: string;
+	spatial_awareness: string;
+	recording_focus: string;
+	skip_guidance: string;
+	output_format_header: string;
+	type_guidance: string;
+	field_guidance: string;
+	concept_guidance: string;
+	format_examples: string;
+	footer: string;
+	header_memory_start: string;
+	header_memory_continued: string;
+	continuation_greeting: string;
+	continuation_instruction: string;
+	header_summary_checkpoint: string;
+	summary_instruction: string;
+	summary_context_label: string;
+	summary_format_instruction: string;
+	summary_footer: string;
+	xml_title_placeholder: string;
+	xml_subtitle_placeholder: string;
+	xml_fact_placeholder: string;
+	xml_narrative_placeholder: string;
+	xml_concept_placeholder: string;
+	xml_file_placeholder: string;
+	xml_summary_request_placeholder: string;
+	xml_summary_investigated_placeholder: string;
+	xml_summary_learned_placeholder: string;
+	xml_summary_completed_placeholder: string;
+	xml_summary_next_steps_placeholder: string;
+	xml_summary_notes_placeholder: string;
 }
 
-/**
- * Search types
- */
-
-export interface SearchQuery {
-  query: string;
-  project?: string;
-  type?: NoteType;
-  tags?: string[];
-  dateRange?: {
-    start?: string;
-    end?: string;
-  };
-  limit?: number;
-  semantic?: boolean;
+export interface ModeConfig {
+	id: string;
+	name: string;
+	description: string;
+	observation_types: ObservationTypeConfig[];
+	observation_concepts: ConceptConfig[];
+	prompts: ModePrompts;
 }
 
-export interface SearchResult {
-  id: string;
-  title: string;
-  type: string;
-  path: string;
-  snippet?: string;
-  score: number;
-  metadata: {
-    project?: string;
-    date?: string;
-    tags?: string[];
-  };
+// ============================================================================
+// SDK Session Types
+// ============================================================================
+
+export interface SDKSession {
+	id: number;
+	session_id: string;
+	memory_session_id: string | null;
+	project: string;
+	user_prompt: string;
+	worker_port: number | null;
+	prompt_counter: number;
+	last_assistant_message: string | null;
 }
 
-/**
- * Note types
- */
+// ============================================================================
+// Context Types
+// ============================================================================
 
-export type NoteType = 'error' | 'decision' | 'pattern' | 'file' | 'learning';
+export interface ContextInput {
+	cwd?: string;
+	session_id?: string;
+	projects?: string[];
+}
 
-export type NoteStatus = 'active' | 'superseded' | 'draft';
+export interface ContextConfig {
+	observationCount: number;
+	sessionCount: number;
+	fullObservationCount: number;
+	maxTokens: number;
+}
+
+export interface TokenEconomics {
+	totalObservations: number;
+	estimatedTokens: number;
+	truncated: boolean;
+}
+
+// ============================================================================
+// Fallback Storage Types
+// ============================================================================
+
+export interface FallbackSession {
+	session_id: string;
+	project: string;
+	started_at: string;
+	started_at_epoch: number;
+	status: "active" | "completed" | "failed";
+}
+
+export interface FallbackData {
+	session: FallbackSession;
+	prompts: Array<Omit<UserPrompt, "id">>;
+	tool_uses: Array<Omit<ToolUse, "id">>;
+	file_reads: Array<Omit<FileRead, "id">>;
+}
+
+// ============================================================================
+// Completion Marker Types
+// ============================================================================
+
+export interface CompletionMarker {
+	completed_at: string;
+	written_notes: string[];
+	success: boolean;
+	error_message?: string;
+}
+
+// ============================================================================
+// Logger Types
+// ============================================================================
+
+export interface LogContext {
+	sessionId?: string;
+	project?: string;
+	[key: string]: unknown;
+}
+
+export type LogLevel = "debug" | "info" | "warn" | "error";
+
+// ============================================================================
+// Knowledge Note Types (for Obsidian vault)
+// ============================================================================
+
+export type NoteType = "error" | "decision" | "pattern" | "file" | "learning";
+export type NoteStatus = "active" | "superseded" | "draft";
 
 export interface NoteFrontmatter {
-  type: NoteType;
-  title?: string;
-  project?: string;
-  created: string;
-  updated: string;
-  tags: string[];
-  aliases?: string[];
-  /** Note status - active (default), superseded, or draft */
-  status?: NoteStatus;
-  /** Wikilink to the note that supersedes this one */
-  superseded_by?: string;
-  /** Wikilinks to notes that this note supersedes */
-  supersedes?: string[];
-  [key: string]: unknown;
+	type: NoteType;
+	title: string;
+	project: string;
+	created: string;
+	updated?: string;
+	tags: string[];
+	status?: NoteStatus;
+	superseded_by?: string;
+	supersedes?: string[];
+	parent?: string;
+	[key: string]: unknown;
 }
-
-export interface Note {
-  path: string;
-  frontmatter: NoteFrontmatter;
-  content: string;
-  title: string;
-}
-
-export interface WriteNoteInput {
-  type: NoteType;
-  title: string;
-  content: string;
-  project?: string;
-  metadata?: Record<string, unknown>;
-  tags?: string[];
-  path?: string;
-  append?: boolean;
-  /** When true, preserves existing frontmatter fields (created, user tags, custom metadata) */
-  preserveFrontmatter?: boolean;
-  /** Note status - active (default), superseded, or draft */
-  status?: NoteStatus;
-  /** Path to note that supersedes this one (for marking as superseded) */
-  superseded_by?: string;
-  /** Paths to notes that this note supersedes */
-  supersedes?: string[];
-}
-
-/**
- * Project context types
- */
-
-export interface ProjectInfo {
-  name: string;
-  path: string;
-  gitRemote?: string;
-  gitBranch?: string;
-}
-
-export interface ProjectContext {
-  project: string;
-  summary: string;
-  unresolvedErrors: Array<{
-    type: string;
-    message: string;
-    lastSeen: string;
-  }>;
-  activeDecisions: Array<{
-    title: string;
-    decision: string;
-  }>;
-  patterns: Array<{
-    name: string;
-    description: string;
-  }>;
-  totalErrorCount?: number;
-  totalDecisionCount?: number;
-  totalPatternCount?: number;
-}
-
-/**
- * Hook input types
- */
-
-export interface SessionStartInput {
-  session_id: string;
-  cwd: string;
-  transcript_path: string;
-}
-
-export interface PostToolUseInput {
-  session_id: string;
-  cwd: string;
-  tool_name: string;
-  tool_input: Record<string, unknown>;
-  /**
-   * Tool response structure varies by tool:
-   * - Some tools return { content: [{ type: 'text', text: '...' }] }
-   * - Read tool returns { type: '...', file: '...' }
-   * - Some return { output: '...' } or { text: '...' }
-   * - $CLAUDE_TOOL_OUTPUT env var also available for PostToolUse events
-   */
-  tool_response: {
-    content?: Array<{ type: string; text?: string }> | string;
-    isError?: boolean;
-    // Tool-specific fields (Read, Grep, etc. may have different structures)
-    [key: string]: unknown;
-  };
-  /** Some hooks provide tool_result directly on input */
-  tool_result?: string;
-}
-
-export interface SessionEndInput {
-  session_id: string;
-  cwd: string;
-  transcript_path: string;
-}
-
