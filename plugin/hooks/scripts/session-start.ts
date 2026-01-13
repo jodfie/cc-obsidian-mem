@@ -150,10 +150,21 @@ async function main() {
       });
 
       try {
+        // Build limitResults based on include* flags
+        const limitResults: { errors?: number; decisions?: number; patterns?: number } = {};
+        if (config.contextInjection.includeRelatedErrors) {
+          limitResults.errors = 3;
+        }
+        limitResults.decisions = 2;
+        if (config.contextInjection.includeProjectPatterns) {
+          limitResults.patterns = 2;
+        }
+
         const context = await vault.getProjectContext(project.name, {
           includeErrors: config.contextInjection.includeRelatedErrors,
           includeDecisions: true,
           includePatterns: config.contextInjection.includeProjectPatterns,
+          limitResults,
         });
 
         logger.debug('Project context retrieved', {
@@ -183,6 +194,7 @@ async function main() {
 
 /**
  * Format project context for output
+ * Two-layer budget: 1) Fixed item limits (3/2/2) for typical case, 2) maxTokens truncation for edge cases with long content
  */
 function formatProjectContext(
   context: Awaited<ReturnType<VaultManager['getProjectContext']>>,
@@ -193,33 +205,56 @@ function formatProjectContext(
   // Add header
   lines.push(`<!-- Memory context for ${context.project} -->`);
 
-  // Unresolved errors
-  if (context.unresolvedErrors.length > 0) {
-    lines.push('\n## Known Issues');
-    for (const error of context.unresolvedErrors.slice(0, 5)) {
+  // Unresolved errors (with safe fallbacks)
+  const totalErrors = context.totalErrorCount ?? context.unresolvedErrors.length;
+  if (totalErrors > 0 && context.unresolvedErrors.length > 0) {
+    const showCount = totalErrors > context.unresolvedErrors.length;
+    lines.push(
+      showCount
+        ? `\n## Known Issues (${totalErrors} total, showing ${context.unresolvedErrors.length} most recent)`
+        : `\n## Known Issues`
+    );
+    for (const error of context.unresolvedErrors) {
       lines.push(`- **${error.type}**: ${error.message}`);
     }
   }
 
-  // Active decisions
-  if (context.activeDecisions.length > 0) {
-    lines.push('\n## Active Decisions');
-    for (const decision of context.activeDecisions.slice(0, 3)) {
+  // Active decisions (with safe fallbacks)
+  const totalDecisions = context.totalDecisionCount ?? context.activeDecisions.length;
+  if (totalDecisions > 0 && context.activeDecisions.length > 0) {
+    const showCount = totalDecisions > context.activeDecisions.length;
+    lines.push(
+      showCount
+        ? `\n## Active Decisions (${totalDecisions} total, showing ${context.activeDecisions.length} most recent)`
+        : `\n## Active Decisions`
+    );
+    for (const decision of context.activeDecisions) {
       lines.push(`- **${decision.title}**: ${decision.decision}`);
     }
   }
 
-  // Patterns
-  if (context.patterns.length > 0) {
-    lines.push('\n## Patterns');
-    for (const pattern of context.patterns.slice(0, 3)) {
+  // Patterns (with safe fallbacks)
+  const totalPatterns = context.totalPatternCount ?? context.patterns.length;
+  if (totalPatterns > 0 && context.patterns.length > 0) {
+    const showCount = totalPatterns > context.patterns.length;
+    lines.push(
+      showCount
+        ? `\n## Patterns (${totalPatterns} total, showing ${context.patterns.length})`
+        : `\n## Patterns`
+    );
+    for (const pattern of context.patterns) {
       lines.push(`- **${pattern.name}**: ${pattern.description}`);
     }
   }
 
+  // Add prompt to use mem_search for full details if anything was shown
+  if (lines.length > 1) {
+    lines.push('\nUse `mem_search` for full details on any of these items.');
+  }
+
   const output = lines.join('\n');
 
-  // Rough token estimate (4 chars per token)
+  // Preserve maxTokens truncation safeguard (rough estimate: 4 chars per token)
   if (output.length > maxTokens * 4) {
     return output.substring(0, maxTokens * 4) + '\n...';
   }

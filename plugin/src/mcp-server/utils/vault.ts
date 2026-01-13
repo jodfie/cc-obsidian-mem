@@ -637,6 +637,7 @@ ${keyPointsSection}${sourceSection}
       knowledgeType?: 'qa' | 'explanation' | 'decision' | 'research' | 'learning';
       topics?: string[];
       limit?: number;
+      lightweight?: boolean;
     } = {}
   ): Promise<SearchResult[]> {
     const results: SearchResult[] = [];
@@ -705,12 +706,11 @@ ${keyPointsSection}${sourceSection}
             title: frontmatter.title || path.basename(file, '.md'),
             type: `knowledge/${frontmatter.knowledge_type || 'unknown'}`,
             path: path.relative(this.vaultPath, file),
-            snippet: this.extractSnippet(content, query),
+            snippet: options.lightweight ? undefined : this.extractSnippet(content, query),
             score: this.calculateScore(fullText, queryLower),
             metadata: {
               project: frontmatter.project,
-              date: frontmatter.created,
-              tags: frontmatter.tags,
+              ...(options.lightweight ? {} : { date: frontmatter.created, tags: frontmatter.tags }),
             },
           });
         } catch {
@@ -734,6 +734,7 @@ ${keyPointsSection}${sourceSection}
     type?: NoteType;
     tags?: string[];
     limit?: number;
+    lightweight?: boolean;
   } = {}): Promise<SearchResult[]> {
     const results: SearchResult[] = [];
     const limit = options.limit || 10;
@@ -783,20 +784,16 @@ ${keyPointsSection}${sourceSection}
           continue;
         }
 
-        // Extract snippet
-        const snippet = this.extractSnippet(content, query);
-
         results.push({
           id: path.basename(file, '.md'),
           title: frontmatter.title || path.basename(file, '.md'),
           type: frontmatter.type,
           path: path.relative(this.vaultPath, file),
-          snippet,
+          snippet: options.lightweight ? undefined : this.extractSnippet(content, query),
           score: this.calculateScore(fullText, queryLower),
           metadata: {
             project: frontmatter.project,
-            date: frontmatter.created,
-            tags: frontmatter.tags,
+            ...(options.lightweight ? {} : { date: frontmatter.created, tags: frontmatter.tags }),
           },
         });
       } catch {
@@ -817,6 +814,7 @@ ${keyPointsSection}${sourceSection}
     includeErrors?: boolean;
     includeDecisions?: boolean;
     includePatterns?: boolean;
+    limitResults?: { errors?: number; decisions?: number; patterns?: number };
   } = {}): Promise<ProjectContext> {
     const projectPath = path.join(
       this.getMemPath(),
@@ -861,12 +859,15 @@ ${keyPointsSection}${sourceSection}
     }
 
     // Get active decisions
+    // Track total count before slicing for summary display
+    let totalDecisionFiles = 0;
     if (options.includeDecisions !== false) {
       const decisionsDir = path.join(projectPath, 'decisions');
       if (fs.existsSync(decisionsDir)) {
-        const decisionFiles = this.walkDir(decisionsDir, '.md')
-          .sort((a, b) => fs.statSync(b).mtime.getTime() - fs.statSync(a).mtime.getTime())
-          .slice(0, 5);
+        const allDecisionFiles = this.walkDir(decisionsDir, '.md')
+          .sort((a, b) => fs.statSync(b).mtime.getTime() - fs.statSync(a).mtime.getTime());
+        totalDecisionFiles = allDecisionFiles.length;
+        const decisionFiles = allDecisionFiles.slice(0, 5);
 
         for (const file of decisionFiles) {
           try {
@@ -885,10 +886,14 @@ ${keyPointsSection}${sourceSection}
     }
 
     // Get patterns from global
+    // Track total count before slicing for summary display
+    let totalPatternFiles = 0;
     if (options.includePatterns !== false) {
       const patternsDir = path.join(this.getMemPath(), GLOBAL_FOLDER, 'patterns');
       if (fs.existsSync(patternsDir)) {
-        const patternFiles = this.walkDir(patternsDir, '.md').slice(0, 5);
+        const allPatternFiles = this.walkDir(patternsDir, '.md');
+        totalPatternFiles = allPatternFiles.length;
+        const patternFiles = allPatternFiles.slice(0, 5);
         for (const file of patternFiles) {
           try {
             const { frontmatter, content } = parseFrontmatter(
@@ -902,6 +907,25 @@ ${keyPointsSection}${sourceSection}
             // Skip
           }
         }
+      }
+    }
+
+    // If limitResults provided, use pre-counted totals and slice arrays
+    if (options.limitResults) {
+      // Errors are not pre-sliced, so array length is accurate
+      context.totalErrorCount = context.unresolvedErrors.length;
+      // Decisions and patterns are pre-sliced to 5, use file counts for accurate totals
+      context.totalDecisionCount = totalDecisionFiles;
+      context.totalPatternCount = totalPatternFiles;
+
+      if (options.limitResults.errors !== undefined) {
+        context.unresolvedErrors = context.unresolvedErrors.slice(0, options.limitResults.errors);
+      }
+      if (options.limitResults.decisions !== undefined) {
+        context.activeDecisions = context.activeDecisions.slice(0, options.limitResults.decisions);
+      }
+      if (options.limitResults.patterns !== undefined) {
+        context.patterns = context.patterns.slice(0, options.limitResults.patterns);
       }
     }
 

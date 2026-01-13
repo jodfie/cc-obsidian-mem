@@ -63,10 +63,10 @@ When releasing a new version, update the version number in **all four files**:
 
 | File                                | Field                | Example              |
 | ----------------------------------- | -------------------- | -------------------- |
-| `plugin/package.json`               | `version`            | `"version": "0.5.2"` |
-| `plugin/.claude-plugin/plugin.json` | `version`            | `"version": "0.5.2"` |
-| `.claude-plugin/marketplace.json`   | `plugins[0].version` | `"version": "0.5.2"` |
-| `plugin/src/mcp-server/index.ts`    | `version`            | `version: "0.5.2"`   |
+| `plugin/package.json`               | `version`            | `"version": "0.5.3"` |
+| `plugin/.claude-plugin/plugin.json` | `version`            | `"version": "0.5.3"` |
+| `.claude-plugin/marketplace.json`   | `plugins[0].version` | `"version": "0.5.3"` |
+| `plugin/src/mcp-server/index.ts`    | `version`            | `version: "0.5.3"`   |
 
 ### Project Structure
 
@@ -159,16 +159,18 @@ To enable verbose debug logging, add to `~/.cc-obsidian-mem/config.json`:
 }
 ```
 
-| Option    | Values         | Description                                      |
-| --------- | -------------- | ------------------------------------------------ |
-| `verbose` | `true`/`false` | Enable debug-level logging (default: `false`)    |
-| `logDir`  | path string    | Custom log directory (default: system temp dir)  |
+| Option    | Values         | Description                                     |
+| --------- | -------------- | ----------------------------------------------- |
+| `verbose` | `true`/`false` | Enable debug-level logging (default: `false`)   |
+| `logDir`  | path string    | Custom log directory (default: system temp dir) |
 
 Log files:
+
 - **Hook logs**: `{logDir}/cc-obsidian-mem-{session_id}.log` (one per session, auto-cleaned after 24h)
 - **MCP server logs**: `{logDir}/cc-obsidian-mem-mcp.log` (shared, rotated at 10MB)
 
 View logs during a session:
+
 ```bash
 tail -f /tmp/cc-obsidian-mem-*.log
 ```

@@ -137,7 +137,7 @@ export interface SearchResult {
   title: string;
   type: string;
   path: string;
-  snippet: string;
+  snippet?: string;
   score: number;
   metadata: {
     project?: string;
@@ -224,6 +224,9 @@ export interface ProjectContext {
     name: string;
     description: string;
   }>;
+  totalErrorCount?: number;
+  totalDecisionCount?: number;
+  totalPatternCount?: number;
 }
 
 /**

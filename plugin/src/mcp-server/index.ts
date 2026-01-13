@@ -29,7 +29,7 @@ async function main() {
 
   const server = new McpServer({
     name: "obsidian-mem",
-    version: "0.5.2",
+    version: "0.5.3",
   });
 
   // Tool: mem_search - Search the knowledge base
@@ -38,7 +38,7 @@ async function main() {
     {
       title: "Search Memory",
       description:
-        "Search the Claude Code knowledge base for errors, decisions, patterns, and learnings. Use semantic search to find relevant information based on natural language queries.",
+        "Step 1: Search the knowledge base. Returns lightweight index with titles, types, and paths. ALWAYS search first before reading full notes. Use mem_read only for relevant results after filtering. Tip: Use type='knowledge' to search all knowledge notes (qa, explanation, decision, research, learning).",
       inputSchema: {
         query: z
           .string()
@@ -90,6 +90,7 @@ async function main() {
             type: regularNoteType,
             tags,
             limit,
+            lightweight: true,
           });
         }
 
@@ -123,6 +124,7 @@ async function main() {
             limit: isKnowledgeOnlySearch
               ? limit
               : Math.max(5, limit - regularResults.length),
+            lightweight: true,
           });
         }
 
@@ -151,7 +153,7 @@ async function main() {
     {
       title: "Read Memory Note",
       description:
-        "Read the full content of a specific note from the knowledge base by path or ID",
+        "Step 2: Read full note content. Only call AFTER filtering with mem_search. Returns complete markdown with frontmatter. Use 'section' param to extract specific headings or blocks.",
       inputSchema: {
         path: z
           .string()
@@ -419,7 +421,7 @@ async function main() {
     {
       title: "Get Project Context",
       description:
-        "Retrieve relevant context for a project including unresolved errors, active decisions, and patterns. Useful at the start of a session to understand project history.",
+        "Retrieve summary context for a project including unresolved errors, active decisions, and patterns. Useful at the start of a session to understand project history. Returns full lists - for detailed notes, use mem_search + mem_read workflow.",
       inputSchema: {
         project: z.string().describe("Project name"),
         includeErrors: z
@@ -699,8 +701,10 @@ function formatSearchResults(results: SearchResult[]): string {
         `**Tags**: ${result.metadata.tags.map((t) => `#${t}`).join(" ")}`
       );
     }
-    lines.push("");
-    lines.push(`> ${result.snippet}`);
+    if (result.snippet) {
+      lines.push("");
+      lines.push(`> ${result.snippet}`);
+    }
     lines.push("");
   }
 

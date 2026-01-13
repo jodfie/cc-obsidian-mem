@@ -46,7 +46,7 @@ The skill accepts a natural language query. Examples:
 
 3. **Present Results**
    - Show a summary of top matches
-   - Include relevant snippets
+   - Show title, type, and path for each result
    - Offer to show full details with `mem_read`
 
 ## Output Format
@@ -56,13 +56,15 @@ Present results clearly:
 ```markdown
 ## Found X results for "query"
 
-### [Title] (type, date)
-> Relevant excerpt from the note...
-**Project**: project-name | **Tags**: #tag1 #tag2
+### [Title]
+**Type**: type | **Path**: `path/to/note.md`
+**Project**: project-name
 
 ---
 
 Would you like me to show the full details of any of these?
+
+Note: Search returns lightweight results. Use mem_read for full note content.
 ```
 
 ## Advanced Usage
