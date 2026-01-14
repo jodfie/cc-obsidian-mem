@@ -7,7 +7,6 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { Database } from "bun:sqlite";
 import { tmpdir } from "os";
 import { join } from "path";
-import { existsSync, unlinkSync } from "fs";
 import { runMigrations } from "../src/sqlite/migrations.js";
 import { createSession } from "../src/sqlite/session-store.js";
 import {
@@ -25,6 +24,7 @@ import {
 	getTypeDistribution,
 } from "../src/sqlite/observations-store.js";
 import type { ParsedObservation } from "../src/shared/types.js";
+import { safeUnlink } from "./test-utils.js";
 
 describe("Observations Store", () => {
 	let db: Database;
@@ -40,10 +40,12 @@ describe("Observations Store", () => {
 	});
 
 	afterEach(() => {
-		db.close();
-		if (existsSync(dbPath)) {
-			unlinkSync(dbPath);
+		try {
+			db.close();
+		} catch {
+			// Ignore close errors
 		}
+		safeUnlink(dbPath);
 	});
 
 	const sampleObservation: ParsedObservation = {

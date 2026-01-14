@@ -16,7 +16,7 @@ import {
 	getSessionFileReads,
 	upsertSessionSummary,
 } from "../sqlite/session-store.js";
-import { loadConfig, getConfigDir } from "../shared/config.js";
+import { loadConfig, getConfigDir, AGENT_SESSION_MARKER } from "../shared/config.js";
 import { createLogger, Logger } from "../shared/logger.js";
 import {
 	KNOWLEDGE_EXTRACTION_SYSTEM_PROMPT,
@@ -233,6 +233,8 @@ async function invokeClaudeCLI(promptFile: string, logger: Logger): Promise<stri
 
 		const child = spawn("claude", args, {
 			stdio: ["ignore", "pipe", "pipe"],
+			env: { ...process.env, [AGENT_SESSION_MARKER]: "1" },
+			windowsHide: true, // Prevent cmd popup on Windows
 		});
 
 		let stdout = "";

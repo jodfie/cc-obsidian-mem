@@ -18,6 +18,7 @@ import {
 	buildContinuationPrompt,
 	buildObservationFormatInstructions,
 } from "../shared/mode-config.js";
+import { AGENT_SESSION_MARKER } from "../shared/config.js";
 import { spawnSync } from "child_process";
 import { writeFileSync, unlinkSync, existsSync } from "fs";
 import { tmpdir } from "os";
@@ -302,11 +303,13 @@ function callClaude(
 
 		writeFileSync(tempFile, fullPrompt, "utf-8");
 
-		// Call Claude CLI
+		// Call Claude CLI with agent session marker to prevent recursive hooks
 		const result = spawnSync("claude", ["-p", tempFile, "--output-format", "text"], {
 			encoding: "utf-8",
 			timeout: 120000, // 2 minute timeout
 			maxBuffer: 10 * 1024 * 1024, // 10MB buffer
+			env: { ...process.env, [AGENT_SESSION_MARKER]: "1" },
+			windowsHide: true, // Prevent cmd popup on Windows
 		});
 
 		if (result.error) {

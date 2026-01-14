@@ -6,7 +6,7 @@
  * Initializes session, cleans up orphans, and injects context
  */
 
-import { loadConfig } from "../../src/shared/config.js";
+import { loadConfig, isAgentSession } from "../../src/shared/config.js";
 import { createLogger } from "../../src/shared/logger.js";
 import { initDatabase, closeDatabase } from "../../src/sqlite/database.js";
 import {
@@ -25,8 +25,9 @@ import { existsSync, readdirSync, statSync, unlinkSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
+// Claude Code sends snake_case fields
 interface SessionStartInput {
-	sessionId: string;
+	session_id: string;
 	cwd: string;
 }
 
@@ -99,18 +100,32 @@ function outputContext(context: string): void {
 async function main() {
 	let logger: ReturnType<typeof createLogger> | null = null;
 
+	// Step 1: Read stdin with dedicated error handling
+	let input: SessionStartInput;
 	try {
-		const input = await readStdinJson<SessionStartInput>();
+		input = await readStdinJson<SessionStartInput>();
+	} catch (error) {
+		console.error("[cc-obsidian-mem] Failed to parse stdin in session-start hook:", error);
+		return;
+	}
 
+	// Step 2: Check if this is an agent session - skip hooks for agent-spawned sessions
+	if (isAgentSession()) {
+		console.error("[cc-obsidian-mem] Skipping session-start hook - agent session");
+		return;
+	}
+
+	// Step 3: Normal processing with its own try-catch
+	try {
 		const config = loadConfig();
 		logger = createLogger({
 			logDir: config.logging?.logDir,
-			sessionId: input.sessionId,
+			sessionId: input.session_id,
 			verbose: config.logging?.verbose,
 		});
 
 		logger.info("SessionStart hook triggered", {
-			sessionId: input.sessionId,
+			sessionId: input.session_id,
 			cwd: input.cwd,
 		});
 

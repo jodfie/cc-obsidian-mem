@@ -207,3 +207,28 @@ export function updateFallbackSessionStatus(
 export function fallbackSessionExists(sessionId: string): boolean {
 	return existsSync(getSessionFilePath(sessionId));
 }
+
+/**
+ * Get next prompt number for fallback session
+ */
+export function getFallbackNextPromptNumber(sessionId: string): number {
+	const data = readFallbackSession(sessionId);
+	if (!data || data.prompts.length === 0) {
+		return 1;
+	}
+
+	const maxPromptNumber = Math.max(...data.prompts.map(p => p.prompt_number));
+	return maxPromptNumber + 1;
+}
+
+/**
+ * Get current prompt number for fallback session (for tool uses)
+ */
+export function getFallbackCurrentPromptNumber(sessionId: string): number {
+	const data = readFallbackSession(sessionId);
+	if (!data || data.prompts.length === 0) {
+		return 1;
+	}
+
+	return Math.max(...data.prompts.map(p => p.prompt_number));
+}

@@ -183,6 +183,38 @@ export function getSessionPrompts(
 	});
 }
 
+/**
+ * Get the next prompt number for a session
+ * Returns 1 if no prompts exist, otherwise max + 1
+ */
+export function getNextPromptNumber(db: Database, sessionId: string): number {
+	return retryWithBackoff(() => {
+		const stmt = db.prepare(`
+			SELECT MAX(prompt_number) as max_num FROM user_prompts
+			WHERE session_id = ?
+		`);
+
+		const result = stmt.get(sessionId) as { max_num: number | null } | null;
+		return (result?.max_num ?? 0) + 1;
+	});
+}
+
+/**
+ * Get the current prompt number for a session (for tool uses)
+ * Returns the max prompt number, or 1 if no prompts recorded yet
+ */
+export function getCurrentPromptNumber(db: Database, sessionId: string): number {
+	return retryWithBackoff(() => {
+		const stmt = db.prepare(`
+			SELECT MAX(prompt_number) as max_num FROM user_prompts
+			WHERE session_id = ?
+		`);
+
+		const result = stmt.get(sessionId) as { max_num: number | null } | null;
+		return result?.max_num ?? 1;
+	});
+}
+
 // ============================================================================
 // Tool Use Operations
 // ============================================================================

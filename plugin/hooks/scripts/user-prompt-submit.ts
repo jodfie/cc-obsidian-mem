@@ -8,23 +8,24 @@
  * 3. Enqueues prompt for SDK agent processing
  */
 
-import { loadConfig } from "../../src/shared/config.js";
+import { loadConfig, isAgentSession } from "../../src/shared/config.js";
 import { createLogger } from "../../src/shared/logger.js";
 import { initDatabase } from "../../src/sqlite/database.js";
-import { addUserPrompt, getSession } from "../../src/sqlite/session-store.js";
+import { addUserPrompt, getSession, getNextPromptNumber } from "../../src/sqlite/session-store.js";
 import { enqueueMessage } from "../../src/sqlite/pending-store.js";
 import { generateContext, generateCompactContext } from "../../src/context/context-builder.js";
 import {
 	initFallbackSession,
 	addFallbackPrompt,
 	fallbackSessionExists,
+	getFallbackNextPromptNumber,
 } from "../../src/fallback/fallback-store.js";
 import { validate, UserPromptSubmitPayloadSchema } from "../../src/shared/validation.js";
 
+// Claude Code sends snake_case fields
 interface UserPromptSubmitInput {
-	sessionId: string;
-	promptNumber: number;
-	promptText: string;
+	session_id: string;
+	prompt: string;
 }
 
 /**
@@ -52,19 +53,32 @@ async function readStdinJson<T>(): Promise<T> {
 async function main() {
 	let logger: ReturnType<typeof createLogger> | null = null;
 
+	// Step 1: Read stdin with dedicated error handling
+	let input: UserPromptSubmitInput;
 	try {
-		const input = await readStdinJson<UserPromptSubmitInput>();
+		input = await readStdinJson<UserPromptSubmitInput>();
+	} catch (error) {
+		console.error("[cc-obsidian-mem] Failed to parse stdin in user-prompt-submit hook:", error);
+		return;
+	}
 
+	// Step 2: Check if this is an agent session - skip hooks for agent-spawned sessions
+	if (isAgentSession()) {
+		console.error("[cc-obsidian-mem] Skipping user-prompt-submit hook - agent session");
+		return;
+	}
+
+	// Step 3: Normal processing with its own try-catch
+	try {
 		const config = loadConfig();
 		logger = createLogger({
 			logDir: config.logging?.logDir,
-			sessionId: input.sessionId,
+			sessionId: input.session_id,
 			verbose: config.logging?.verbose,
 		});
 
 		logger.debug("UserPromptSubmit hook triggered", {
-			sessionId: input.sessionId,
-			promptNumber: input.promptNumber,
+			sessionId: input.session_id,
 		});
 
 		// Validate input
@@ -82,28 +96,31 @@ async function main() {
 				return;
 			}
 
+			// Auto-assign prompt number (Claude Code doesn't send this)
+			const promptNumber = getNextPromptNumber(db, validated.sessionId);
+
 			// Add prompt to database
 			addUserPrompt(
 				db,
 				validated.sessionId,
-				validated.promptNumber,
+				promptNumber,
 				validated.promptText
 			);
 
 			// Enqueue prompt for SDK agent processing
 			enqueueMessage(db, validated.sessionId, "prompt", {
 				prompt_text: validated.promptText,
-				prompt_number: validated.promptNumber,
+				prompt_number: promptNumber,
 			});
 
 			logger.info("User prompt recorded and enqueued", {
-				promptNumber: validated.promptNumber,
+				promptNumber: promptNumber,
 				promptLength: validated.promptText.length,
 			});
 
 			// Generate and inject memory context
 			// Skip context injection for first prompt (handled in SessionStart)
-			if (validated.promptNumber > 1) {
+			if (promptNumber > 1) {
 				try {
 					const context = generateContext(db, session.project, validated.sessionId);
 
@@ -131,14 +148,17 @@ async function main() {
 				return;
 			}
 
+			// Auto-assign prompt number in fallback too
+			const promptNumber = getFallbackNextPromptNumber(validated.sessionId);
+
 			addFallbackPrompt(
 				validated.sessionId,
-				validated.promptNumber,
+				promptNumber,
 				validated.promptText
 			);
 
 			logger.info("User prompt recorded to fallback storage", {
-				promptNumber: validated.promptNumber,
+				promptNumber: promptNumber,
 			});
 		}
 	} catch (error) {

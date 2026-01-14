@@ -9,7 +9,7 @@
  * 4. Triggers background summarization for vault export
  */
 
-import { loadConfig } from "../../src/shared/config.js";
+import { loadConfig, isAgentSession } from "../../src/shared/config.js";
 import { createLogger } from "../../src/shared/logger.js";
 import { initDatabase, closeDatabase } from "../../src/sqlite/database.js";
 import {
@@ -30,8 +30,9 @@ import { spawn } from "child_process";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 
+// Claude Code sends snake_case fields
 interface StopInput {
-	sessionId: string;
+	session_id: string;
 }
 
 /**
@@ -59,17 +60,31 @@ async function readStdinJson<T>(): Promise<T> {
 async function main() {
 	let logger: ReturnType<typeof createLogger> | null = null;
 
+	// Step 1: Read stdin with dedicated error handling
+	let input: StopInput;
 	try {
-		const input = await readStdinJson<StopInput>();
+		input = await readStdinJson<StopInput>();
+	} catch (error) {
+		console.error("[cc-obsidian-mem] Failed to parse stdin in stop hook:", error);
+		return;
+	}
 
+	// Step 2: Check if this is an agent session - skip hooks for agent-spawned sessions
+	if (isAgentSession()) {
+		console.error("[cc-obsidian-mem] Skipping stop hook - agent session");
+		return;
+	}
+
+	// Step 3: Normal processing with its own try-catch
+	try {
 		const config = loadConfig();
 		logger = createLogger({
 			logDir: config.logging?.logDir,
-			sessionId: input.sessionId,
+			sessionId: input.session_id,
 			verbose: config.logging?.verbose,
 		});
 
-		logger.info("Stop hook triggered", { sessionId: input.sessionId });
+		logger.info("Stop hook triggered", { sessionId: input.session_id });
 
 		// Validate input
 		const validated = validate(StopPayloadSchema, input);
@@ -170,6 +185,7 @@ function triggerBackgroundSummarization(
 		const child = spawn("bun", ["run", summarizerPath, sessionId], {
 			detached: true,
 			stdio: "ignore",
+			windowsHide: true, // Prevent cmd popup on Windows
 		});
 
 		child.unref();

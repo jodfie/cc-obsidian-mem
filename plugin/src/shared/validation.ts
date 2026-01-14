@@ -18,30 +18,34 @@ export const SessionStartPayloadSchema = z.object({
 	cwd: data.cwd,
 }));
 
+// Claude Code does NOT send prompt_number - we track it internally per session
 export const UserPromptSubmitPayloadSchema = z.object({
 	session_id: z.string().min(1),
-	prompt_number: z.number().int().positive(),
 	prompt: z.string(),
 }).transform((data) => ({
 	sessionId: data.session_id,
-	promptNumber: data.prompt_number,
 	promptText: data.prompt,
 }));
 
+// Claude Code sends tool_input and tool_response as objects, not strings
+// Also does NOT send prompt_number - we track it internally
 export const PostToolUsePayloadSchema = z.object({
 	session_id: z.string().min(1),
-	prompt_number: z.number().int().positive(),
 	tool_name: z.string().min(1),
-	tool_input: z.string(),
-	tool_response: z.string(),
+	tool_input: z.unknown(), // Can be object or string
+	tool_response: z.unknown(), // Can be object or string
 	duration_ms: z.number().int().nonnegative().optional(),
 	cwd: z.string().optional(),
 }).transform((data) => ({
 	sessionId: data.session_id,
-	promptNumber: data.prompt_number,
 	toolName: data.tool_name,
-	toolInput: data.tool_input,
-	toolOutput: data.tool_response,
+	// Stringify if object, keep as-is if already string
+	toolInput: typeof data.tool_input === 'string'
+		? data.tool_input
+		: JSON.stringify(data.tool_input),
+	toolOutput: typeof data.tool_response === 'string'
+		? data.tool_response
+		: JSON.stringify(data.tool_response),
 	durationMs: data.duration_ms,
 	cwd: data.cwd,
 }));
@@ -130,15 +134,23 @@ export const ConfigSchema = z.object({
 /**
  * Validate and parse data with a schema
  * Throws ZodError if validation fails
+ * Works with both regular schemas and transforms
  */
-export function validate<T>(schema: z.ZodSchema<T>, data: unknown): T {
+export function validate<S extends z.ZodTypeAny>(
+	schema: S,
+	data: unknown
+): z.output<S> {
 	return schema.parse(data);
 }
 
 /**
  * Safely validate data, returning null if validation fails
+ * Works with both regular schemas and transforms
  */
-export function safeValidate<T>(schema: z.ZodSchema<T>, data: unknown): T | null {
+export function safeValidate<S extends z.ZodTypeAny>(
+	schema: S,
+	data: unknown
+): z.output<S> | null {
 	const result = schema.safeParse(data);
 	return result.success ? result.data : null;
 }

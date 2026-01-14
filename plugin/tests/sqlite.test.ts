@@ -7,7 +7,6 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { Database } from "bun:sqlite";
 import { tmpdir } from "os";
 import { join } from "path";
-import { existsSync, unlinkSync } from "fs";
 import { runMigrations } from "../src/sqlite/migrations.js";
 import {
 	createSession,
@@ -22,6 +21,7 @@ import {
 	deleteSession,
 } from "../src/sqlite/session-store.js";
 import { createLogger } from "../src/shared/logger.js";
+import { safeUnlink } from "./test-utils.js";
 
 describe("SQLite Database", () => {
 	let db: Database;
@@ -35,10 +35,12 @@ describe("SQLite Database", () => {
 	});
 
 	afterEach(() => {
-		db.close();
-		if (existsSync(dbPath)) {
-			unlinkSync(dbPath);
+		try {
+			db.close();
+		} catch {
+			// Ignore close errors
 		}
+		safeUnlink(dbPath);
 	});
 
 	describe("Session Operations", () => {

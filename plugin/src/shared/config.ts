@@ -82,3 +82,17 @@ function mergeConfig(defaults: Config, user: Partial<Config>): Config {
 export function getConfigDir(): string {
 	return CONFIG_DIR;
 }
+
+/**
+ * Environment variable set when spawning claude from SDK agent or summarizer
+ * to prevent recursive hook execution
+ */
+export const AGENT_SESSION_MARKER = "CC_MEM_AGENT_SESSION";
+
+/**
+ * Check if current session is an agent-spawned session
+ * @returns true if running in an agent session (should skip hooks)
+ */
+export function isAgentSession(): boolean {
+	return process.env[AGENT_SESSION_MARKER] === "1";
+}
