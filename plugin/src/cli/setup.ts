@@ -1,316 +1,226 @@
 #!/usr/bin/env bun
 
-import * as fs from 'fs';
-import * as path from 'path';
-import * as os from 'os';
-import * as readline from 'readline';
-import { getDefaultConfig, saveConfig, getConfigDir, getMemFolderPath } from '../shared/config.js';
-import { VaultManager } from '../mcp-server/utils/vault.js';
-import { stringifyFrontmatter, generateFrontmatter } from '../mcp-server/utils/frontmatter.js';
+/**
+ * Setup CLI for cc-obsidian-mem
+ * Interactive configuration wizard
+ */
 
-const rl = readline.createInterface({
-  input: process.stdin,
-  output: process.stdout,
-});
+import { existsSync, mkdirSync, writeFileSync, readFileSync } from "fs";
+import { join } from "path";
+import { homedir, tmpdir } from "os";
+import type { Config } from "../shared/types.js";
+import { initDatabase, closeDatabase } from "../sqlite/database.js";
+import { createLogger } from "../shared/logger.js";
 
-function ask(question: string): Promise<string> {
-  return new Promise((resolve) => {
-    rl.question(question, (answer) => {
-      resolve(answer.trim());
-    });
-  });
+const CONFIG_DIR = join(homedir(), ".cc-obsidian-mem");
+const CONFIG_FILE = join(CONFIG_DIR, "config.json");
+
+const DEFAULT_CONFIG: Config = {
+	vault: {
+		path: join(homedir(), "_claude-mem"),
+		memFolder: "_claude-mem",
+	},
+	sqlite: {
+		path: join(CONFIG_DIR, "sessions.db"),
+		retention: {
+			sessions: 50,
+			orphan_timeout_hours: 24,
+			file_reads_per_file: 5,
+		},
+		max_output_size: 100 * 1024,
+	},
+	logging: {
+		verbose: false,
+		logDir: tmpdir(),
+	},
+	canvas: {
+		enabled: false,
+		autoGenerate: false,
+		updateStrategy: "skip",
+	},
+};
+
+async function prompt(question: string, defaultValue?: string): Promise<string> {
+	const suffix = defaultValue ? ` [${defaultValue}]` : "";
+	process.stdout.write(`${question}${suffix}: `);
+
+	for await (const line of console) {
+		const answer = line.trim();
+		return answer || defaultValue || "";
+	}
+	return defaultValue || "";
+}
+
+async function promptYesNo(question: string, defaultYes: boolean = false): Promise<boolean> {
+	const suffix = defaultYes ? " [Y/n]" : " [y/N]";
+	process.stdout.write(`${question}${suffix}: `);
+
+	for await (const line of console) {
+		const answer = line.trim().toLowerCase();
+		if (answer === "") return defaultYes;
+		return answer === "y" || answer === "yes";
+	}
+	return defaultYes;
+}
+
+async function initDatabaseOnly(): Promise<void> {
+	console.log("\n=== Database Initialization ===\n");
+
+	if (!existsSync(CONFIG_FILE)) {
+		console.error(`Config not found at ${CONFIG_FILE}`);
+		console.error("Run setup first without --init-db flag");
+		process.exit(1);
+	}
+
+	const config = JSON.parse(readFileSync(CONFIG_FILE, "utf-8"));
+	const logger = createLogger({ verbose: false });
+	const dbPath = config.sqlite?.path || join(CONFIG_DIR, "sessions.db");
+
+	console.log(`Initializing database: ${dbPath}`);
+
+	try {
+		const db = initDatabase(dbPath, logger);
+		closeDatabase(db, logger);
+		console.log("Database initialized successfully!");
+	} catch (error) {
+		console.error("Failed to initialize database:", error);
+		process.exit(1);
+	}
 }
 
 async function main() {
-  console.log('\n🧠 cc-obsidian-mem Setup Wizard\n');
-  console.log('This will configure the Obsidian-based memory system for Claude Code.\n');
-
-  const config = getDefaultConfig();
-
-  // Ask for vault path
-  const defaultVaultPath = path.join(os.homedir(), 'ObsidianVault');
-  const vaultPath = await ask(`Obsidian vault path [${defaultVaultPath}]: `);
-  config.vault.path = vaultPath || defaultVaultPath;
-
-  // Ask for memory folder name
-  const memFolder = await ask(`Memory folder name [_claude-mem]: `);
-  config.vault.memFolder = memFolder || '_claude-mem';
-
-  // Ask about AI summarization
-  const enableSummarization = await ask('Enable AI-powered session summaries? [Y/n]: ');
-  config.summarization.enabled = !enableSummarization.toLowerCase().startsWith('n');
-
-  if (config.summarization.enabled) {
-    const model = await ask('Summarization model (sonnet/opus/haiku) [sonnet]: ');
-    config.summarization.model = model || 'sonnet';
-    console.log('\n💡 Note: Summarization uses Claude Code\'s existing subscription via Agent SDK.');
-    console.log('   No separate API key is required.\n');
-  }
-
-  // Save configuration
-  console.log('\nSaving configuration...');
-  const configDir = getConfigDir();
-  if (!fs.existsSync(configDir)) {
-    fs.mkdirSync(configDir, { recursive: true });
-  }
-  saveConfig(config);
-  console.log(`Configuration saved to: ${path.join(configDir, 'config.json')}`);
-
-  // Create vault structure
-  console.log('\nCreating vault structure...');
-  const vault = new VaultManager(config.vault.path, config.vault.memFolder);
-  await vault.ensureStructure();
-
-  // Create main dashboard
-  await createDashboard(config.vault.path, config.vault.memFolder);
-
-  // Create templates
-  await createTemplates(config.vault.path, config.vault.memFolder);
-
-  console.log(`Vault structure created at: ${path.join(config.vault.path, config.vault.memFolder)}`);
-
-  // Print next steps
-  console.log('\n✅ Setup complete!\n');
-  console.log('Next steps:');
-  console.log('1. Open your Obsidian vault and enable the Dataview plugin (recommended)');
-  console.log('2. Install this plugin in Claude Code:');
-  console.log('   claude-code plugin install /path/to/cc-obsidian-mem');
-  console.log('3. Start a new Claude Code session to begin capturing memories\n');
-
-  rl.close();
-}
-
-async function createDashboard(vaultPath: string, memFolder: string): Promise<void> {
-  const dashboardPath = path.join(vaultPath, memFolder, '_index.md');
-
-  const frontmatter = generateFrontmatter('learning', {
-    title: 'Claude Memory Dashboard',
-    tags: ['index', 'dashboard'],
-  });
-
-  const content = `# Claude Memory Dashboard
-
-Welcome to your Claude Code knowledge base. This dashboard provides an overview of all captured memories.
-
-## Quick Stats
-
-- **Total Notes**: \`$= dv.pages('"${memFolder}"').length\`
-- **Knowledge**: \`$= dv.pages('"${memFolder}"').where(p => p.type == "learning").length\`
-- **Errors**: \`$= dv.pages('"${memFolder}"').where(p => p.type == "error").length\`
-- **Decisions**: \`$= dv.pages('"${memFolder}"').where(p => p.type == "decision").length\`
-
-## Active Projects
-
-\`\`\`dataview
-TABLE length(rows) as "Notes"
-FROM "${memFolder}/projects"
-GROUP BY project
-SORT length(rows) DESC
-\`\`\`
-
-## Unresolved Errors
-
-\`\`\`dataview
-TABLE occurrences as "Count", last_seen as "Last Seen", project
-FROM "${memFolder}"
-WHERE type = "error" AND resolved = false
-SORT occurrences DESC
-LIMIT 10
-\`\`\`
-
-## Recent Decisions
-
-\`\`\`dataview
-LIST
-FROM "${memFolder}"
-WHERE type = "decision"
-SORT date DESC
-LIMIT 10
-\`\`\`
-
-## Patterns
-
-\`\`\`dataview
-TABLE category, usage_count as "Usage"
-FROM "${memFolder}/projects"
-WHERE type = "pattern"
-SORT usage_count DESC
-LIMIT 10
-\`\`\`
-
----
-
-> [!tip] Getting Started
-> - Use \`/mem-search\` to search your knowledge base
-> - Use \`/mem-save\` to explicitly save learnings
-> - Use \`/mem-status\` to check system status
-`;
-
-  fs.writeFileSync(dashboardPath, stringifyFrontmatter(frontmatter, content));
-}
-
-async function createTemplates(vaultPath: string, memFolder: string): Promise<void> {
-  const templatesDir = path.join(vaultPath, memFolder, 'templates');
-
-  if (!fs.existsSync(templatesDir)) {
-    fs.mkdirSync(templatesDir, { recursive: true });
-  }
-
-  // Error template
-  fs.writeFileSync(path.join(templatesDir, 'error.md'), `---
-type: error
-error_type: ""
-project: ""
-first_seen:
-last_seen:
-occurrences: 1
-resolved: false
-tags:
-  - error
----
-
-# Error: {{error_type}}
-
-## Summary
-
-> [!danger] Error Pattern
-> {{error_message}}
-
-## Context
-
-**File**: \`\`
-**Line**:
-
-## Error Message
-
-\`\`\`
-{{error_message}}
-\`\`\`
-
-## Stack Trace
-
-\`\`\`
-{{stack_trace}}
-\`\`\`
-
-## Resolution
-
-> [!success] Solution
-> _Not yet resolved_
-
-## Occurrences
-
-| Date | Session | Context |
-|------|---------|---------|
-| | | |
-`);
-
-  // Decision template
-  fs.writeFileSync(path.join(templatesDir, 'decision.md'), `---
-type: decision
-title: ""
-project: ""
-date:
-status: "accepted"
-tags:
-  - decision
----
-
-# Decision: {{title}}
-
-## Context
-
-What is the issue that we're seeing that is motivating this decision?
-
-## Decision
-
-What is the change that we're proposing and/or doing?
-
-## Rationale
-
-Why is this the best approach?
-
-## Consequences
-
-### Positive
-
--
-
-### Negative
-
--
-
-## Alternatives Considered
-
-- Alternative 1: Why not chosen
-`);
-
-  // Pattern template
-  fs.writeFileSync(path.join(templatesDir, 'pattern.md'), `---
-type: pattern
-name: ""
-category: ""
-usage_count: 0
-tags:
-  - pattern
----
-
-# Pattern: {{name}}
-
-## Description
-
-What does this pattern do?
-
-## When to Use
-
-In what situations should this pattern be applied?
-
-## Implementation
-
-\`\`\`language
-// Code example
-\`\`\`
-
-## Example Usage
-
-\`\`\`language
-// Usage example
-\`\`\`
-
-## Notes
-
-Additional context or caveats.
-`);
-
-  // Learning template
-  fs.writeFileSync(path.join(templatesDir, 'learning.md'), `---
-type: learning
-title: ""
-tags:
-  - learning
----
-
-# {{title}}
-
-## Key Insight
-
-What was learned?
-
-## Context
-
-How did this come up?
-
-## Application
-
-How can this be applied in the future?
-
-## Related
-
-- [[Related Note]]
-`);
+	// Check for --init-db flag
+	if (process.argv.includes("--init-db")) {
+		await initDatabaseOnly();
+		return;
+	}
+
+	console.log("\n=== cc-obsidian-mem Setup ===\n");
+
+	// Check for existing config
+	if (existsSync(CONFIG_FILE)) {
+		console.log(`Found existing config at ${CONFIG_FILE}`);
+		const overwrite = await promptYesNo("Do you want to reconfigure?", false);
+		if (!overwrite) {
+			console.log("Setup cancelled. Existing config preserved.");
+			process.exit(0);
+		}
+	}
+
+	// Ensure config directory exists
+	if (!existsSync(CONFIG_DIR)) {
+		mkdirSync(CONFIG_DIR, { recursive: true });
+		console.log(`Created config directory: ${CONFIG_DIR}`);
+	}
+
+	const config: Config = { ...DEFAULT_CONFIG };
+
+	// Vault configuration
+	console.log("\n--- Vault Configuration ---\n");
+	console.log("The vault is where your knowledge notes will be stored.");
+	console.log("This can be an existing Obsidian vault or a new directory.\n");
+
+	const vaultPath = await prompt(
+		"Vault path",
+		DEFAULT_CONFIG.vault.path
+	);
+	config.vault.path = vaultPath.startsWith("~")
+		? vaultPath.replace("~", homedir())
+		: vaultPath;
+
+	const memFolder = await prompt(
+		"Memory folder name (inside vault)",
+		DEFAULT_CONFIG.vault.memFolder
+	);
+	config.vault.memFolder = memFolder;
+
+	// Create vault directory if it doesn't exist
+	const fullVaultPath = join(config.vault.path, config.vault.memFolder || "_claude-mem");
+	if (!existsSync(fullVaultPath)) {
+		const createVault = await promptYesNo(
+			`Vault directory doesn't exist. Create ${fullVaultPath}?`,
+			true
+		);
+		if (createVault) {
+			mkdirSync(fullVaultPath, { recursive: true });
+			console.log(`Created vault directory: ${fullVaultPath}`);
+		}
+	}
+
+	// SQLite configuration
+	console.log("\n--- Database Configuration ---\n");
+
+	const sqlitePath = await prompt(
+		"SQLite database path",
+		DEFAULT_CONFIG.sqlite.path
+	);
+	config.sqlite = {
+		...DEFAULT_CONFIG.sqlite,
+		path: sqlitePath.startsWith("~")
+			? sqlitePath.replace("~", homedir())
+			: sqlitePath,
+	};
+
+	// Logging configuration
+	console.log("\n--- Logging Configuration ---\n");
+
+	const verboseLogging = await promptYesNo("Enable verbose logging?", false);
+	config.logging = {
+		verbose: verboseLogging,
+	};
+
+	// Canvas configuration
+	console.log("\n--- Canvas Configuration ---\n");
+	console.log("Canvas generates visual diagrams of your knowledge in Obsidian.\n");
+
+	const enableCanvas = await promptYesNo("Enable canvas generation?", false);
+	config.canvas = {
+		enabled: enableCanvas,
+		autoGenerate: enableCanvas,
+		updateStrategy: "skip",
+	};
+
+	// Default project
+	console.log("\n--- Default Project ---\n");
+
+	const defaultProject = await prompt(
+		"Default project name (optional, press Enter to skip)",
+		""
+	);
+	if (defaultProject) {
+		config.defaultProject = defaultProject;
+	}
+
+	// Write config
+	const configJson = JSON.stringify(config, null, 2);
+	writeFileSync(CONFIG_FILE, configJson, "utf-8");
+	console.log(`\nConfig saved to: ${CONFIG_FILE}`);
+
+	// Initialize database
+	console.log("\n--- Database Initialization ---\n");
+	console.log("Initializing SQLite database...");
+
+	const logger = createLogger({ verbose: false });
+	const dbPath = config.sqlite.path || join(CONFIG_DIR, "sessions.db");
+
+	try {
+		const db = initDatabase(dbPath, logger);
+		closeDatabase(db, logger);
+		console.log(`Database initialized: ${dbPath}`);
+	} catch (error) {
+		console.error("Failed to initialize database:", error);
+		process.exit(1);
+	}
+
+	console.log("\n=== Setup Complete ===\n");
+	console.log(`Config: ${CONFIG_FILE}`);
+	console.log(`Vault: ${config.vault.path}/${config.vault.memFolder}`);
+	console.log(`Database: ${dbPath}`);
+	console.log("\nYou can edit the config file manually at any time.");
+	console.log("\nRestart Claude Code to load the new configuration.\n");
 }
 
 main().catch((error) => {
-  console.error('Setup failed:', error);
-  process.exit(1);
+	console.error("Setup failed:", error);
+	process.exit(1);
 });

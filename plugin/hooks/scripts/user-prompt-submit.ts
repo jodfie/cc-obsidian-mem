@@ -3,69 +3,172 @@
 /**
  * UserPromptSubmit Hook
  *
- * Runs when user submits a prompt, before Claude processes it.
- * Captures user prompts as observations for later analysis.
+ * 1. Injects memory context before each prompt
+ * 2. Records user prompts to SQLite
+ * 3. Enqueues prompt for SDK agent processing
  */
 
-import { loadConfig } from '../../src/shared/config.js';
-import { addObservation, readSession } from '../../src/shared/session-store.js';
-import { readStdinJson, generateObservationId } from './utils/helpers.js';
-import { createLogger } from '../../src/shared/logger.js';
-import type { Observation } from '../../src/shared/types.js';
+import { loadConfig, isAgentSession } from "../../src/shared/config.js";
+import { createLogger } from "../../src/shared/logger.js";
+import { initDatabase } from "../../src/sqlite/database.js";
+import { addUserPrompt, getSession, getNextPromptNumber } from "../../src/sqlite/session-store.js";
+import { enqueueMessage } from "../../src/sqlite/pending-store.js";
+import { generateContext, generateCompactContext } from "../../src/context/context-builder.js";
+import {
+	initFallbackSession,
+	addFallbackPrompt,
+	fallbackSessionExists,
+	getFallbackNextPromptNumber,
+} from "../../src/fallback/fallback-store.js";
+import { validate, UserPromptSubmitPayloadSchema } from "../../src/shared/validation.js";
 
+// Claude Code sends snake_case fields
 interface UserPromptSubmitInput {
-  session_id: string;
-  cwd: string;
-  prompt: string;
+	session_id: string;
+	prompt: string;
+}
+
+/**
+ * Read JSON from stdin
+ */
+async function readStdinJson<T>(): Promise<T> {
+	const stdin = Bun.stdin.stream();
+	const reader = stdin.getReader();
+	const chunks: Uint8Array[] = [];
+
+	try {
+		while (true) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			chunks.push(value);
+		}
+
+		const text = new TextDecoder().decode(Buffer.concat(chunks));
+		return JSON.parse(text) as T;
+	} finally {
+		reader.releaseLock();
+	}
 }
 
 async function main() {
-  try {
-    const input = await readStdinJson<UserPromptSubmitInput>();
-    const config = loadConfig();
-    const logger = createLogger('user-prompt-submit', input.session_id);
+	let logger: ReturnType<typeof createLogger> | null = null;
 
-    logger.debug('User prompt submit hook triggered', { session_id: input.session_id, promptLength: input.prompt?.length });
+	// Step 1: Read stdin with dedicated error handling
+	let input: UserPromptSubmitInput;
+	try {
+		input = await readStdinJson<UserPromptSubmitInput>();
+	} catch (error) {
+		console.error("[cc-obsidian-mem] Failed to parse stdin in user-prompt-submit hook:", error);
+		return;
+	}
 
-    // Validate session
-    if (!input.session_id || !input.prompt) {
-      logger.debug('Invalid input: missing session_id or prompt');
-      return;
-    }
+	// Step 2: Check if this is an agent session - skip hooks for agent-spawned sessions
+	if (isAgentSession()) {
+		console.error("[cc-obsidian-mem] Skipping user-prompt-submit hook - agent session");
+		return;
+	}
 
-    // Allow stopped sessions to receive observations (user can continue after stop)
-    const session = readSession(input.session_id);
-    if (!session || (session.status !== 'active' && session.status !== 'stopped')) {
-      logger.debug('Session not found or not writable', { sessionExists: !!session, status: session?.status });
-      return;
-    }
+	// Step 3: Normal processing with its own try-catch
+	try {
+		const config = loadConfig();
+		logger = createLogger({
+			logDir: config.logging?.logDir,
+			sessionId: input.session_id,
+			verbose: config.logging?.verbose,
+		});
 
-    // Skip very short prompts (likely just commands or acknowledgments)
-    if (input.prompt.trim().length < 20) {
-      logger.debug('Skipping short prompt', { length: input.prompt.trim().length });
-      return;
-    }
+		logger.debug("UserPromptSubmit hook triggered", {
+			sessionId: input.session_id,
+		});
 
-    // Create observation for the user prompt
-    const observation: Observation = {
-      id: generateObservationId(),
-      timestamp: new Date().toISOString(),
-      tool: 'UserPrompt',
-      type: 'other',
-      isError: false,
-      data: {
-        prompt: input.prompt.substring(0, 5000), // Truncate very long prompts
-        promptLength: input.prompt.length,
-      },
-    };
+		// Validate input
+		const validated = validate(UserPromptSubmitPayloadSchema, input);
 
-    // Add to session observations
-    addObservation(input.session_id, observation);
-    logger.info('User prompt observation recorded', { promptLength: input.prompt.length });
-  } catch (error) {
-    // Silently fail to not break Claude Code (don't use logger here, might not be initialized)
-    console.error('UserPromptSubmit hook error:', error);
-  }
+		// Try SQLite first
+		try {
+			const db = initDatabase(config.sqlite.path!, logger);
+
+			// Check session exists and is active
+			const session = getSession(db, validated.sessionId);
+			if (!session) {
+				logger.warn("Session not found, skipping prompt recording");
+				db.close();
+				return;
+			}
+
+			// Auto-assign prompt number (Claude Code doesn't send this)
+			const promptNumber = getNextPromptNumber(db, validated.sessionId);
+
+			// Add prompt to database
+			addUserPrompt(
+				db,
+				validated.sessionId,
+				promptNumber,
+				validated.promptText
+			);
+
+			// Enqueue prompt for SDK agent processing
+			enqueueMessage(db, validated.sessionId, "prompt", {
+				prompt_text: validated.promptText,
+				prompt_number: promptNumber,
+			});
+
+			logger.info("User prompt recorded and enqueued", {
+				promptNumber: promptNumber,
+				promptLength: validated.promptText.length,
+			});
+
+			// Generate and inject memory context
+			// Skip context injection for first prompt (handled in SessionStart)
+			if (promptNumber > 1) {
+				try {
+					const context = generateContext(db, session.project, validated.sessionId);
+
+					if (context && context.length > 50) {
+						// Output context as a comment that will be injected
+						console.log(context);
+						logger.debug("Context injected", {
+							contextLength: context.length,
+							project: session.project,
+						});
+					}
+				} catch (contextError) {
+					// Context injection is non-critical, log and continue
+					logger.warn("Context generation failed", { error: contextError });
+				}
+			}
+
+			db.close();
+		} catch (sqliteError) {
+			logger.warn("SQLite error, using fallback storage", { error: sqliteError });
+
+			// Fallback to JSON storage
+			if (!fallbackSessionExists(validated.sessionId)) {
+				logger.warn("Fallback session not found, cannot record prompt");
+				return;
+			}
+
+			// Auto-assign prompt number in fallback too
+			const promptNumber = getFallbackNextPromptNumber(validated.sessionId);
+
+			addFallbackPrompt(
+				validated.sessionId,
+				promptNumber,
+				validated.promptText
+			);
+
+			logger.info("User prompt recorded to fallback storage", {
+				promptNumber: promptNumber,
+			});
+		}
+	} catch (error) {
+		// Log error but don't throw - hooks must never crash
+		if (logger) {
+			logger.error("UserPromptSubmit hook error", { error });
+		} else {
+			console.error("UserPromptSubmit hook error:", error);
+		}
+	}
 }
 
 main();

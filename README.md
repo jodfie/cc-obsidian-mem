@@ -5,9 +5,12 @@ Obsidian-based persistent memory system for Claude Code. Automatically captures 
 ## Features
 
 - **Automatic Capture**: Hooks automatically track file edits, commands, and errors
-- **AI Summaries**: Claude-powered knowledge extraction from conversations
+- **Exploration Tracking**: Captures codebase exploration (files read, search patterns used)
+- **AI Summaries**: Claude-powered knowledge extraction from conversations with Zod validation
 - **Obsidian Integration**: Full Obsidian syntax support with Dataview queries for visualization
 - **Canvas Visualizations**: Auto-generated dashboard, timeline, and graph canvases
+- **File-Based Indexing**: JSON index files for faster search operations
+- **Session Summaries**: Creates session summary notes with exploration history
 - **Project Organization**: Memories organized by project with cross-project patterns
 - **MCP Tools**: Search, read, and write memories directly from Claude Code
 - **Skills**: User-invokable commands (`/mem-search`, `/mem-save`, `/mem-status`)
@@ -91,6 +94,10 @@ The wizard will prompt you for your Obsidian vault path and create the config fi
     "enabled": true,
     "autoGenerate": true,
     "updateStrategy": "always"
+  },
+  "processing": {
+    "frequency": "compact-only",
+    "periodicInterval": 10
   }
 }
 ```
@@ -117,10 +124,12 @@ You have access to a persistent memory system via MCP tools. Use it proactively.
 | `mem_search`          | Looking for past decisions, errors, patterns, or context |
 | `mem_read`            | Need full content of a specific note                     |
 | `mem_write`           | Saving important decisions, patterns, or learnings       |
+| `mem_write_knowledge` | Saving Q&A, explanations, research from conversations    |
 | `mem_supersede`       | Updating/replacing outdated information                  |
 | `mem_project_context` | Starting work on a project (get recent context)          |
 | `mem_list_projects`   | Need to see all tracked projects                         |
 | `mem_generate_canvas` | Generate Obsidian canvas visualizations                  |
+| `mem_file_ops`        | Delete, move, or create directories in the vault         |
 
 ### When to Search Memory
 
@@ -201,11 +210,13 @@ These tools are available to Claude during conversations:
 | --------------------- | ----------------------------------------------------------------------- |
 | `mem_search`          | Search notes by query, project, type, or tags                           |
 | `mem_read`            | Read a specific note's content                                          |
-| `mem_write`           | Create or update notes                                                  |
+| `mem_write`           | Create or update notes (error, decision, pattern, file, learning)       |
+| `mem_write_knowledge` | Write knowledge notes (qa, explanation, decision, research, learning)   |
 | `mem_supersede`       | Create a new note that supersedes an existing one (bidirectional links) |
 | `mem_project_context` | Get context for a project                                               |
 | `mem_list_projects`   | List all tracked projects                                               |
 | `mem_generate_canvas` | Generate canvas visualizations (dashboard, timeline, graph)             |
+| `mem_file_ops`        | Cross-platform file operations (delete, move, mkdir) for vault cleanup  |
 
 ---
 
@@ -244,6 +255,7 @@ vault/
 │   ├── projects/
 │   │   └── {project-name}/
 │   │       ├── {project-name}.md    # Project overview
+│   │       ├── _index.json          # Project index (auto-generated for fast search)
 │   │       ├── errors/
 │   │       │   ├── errors.md        # Category index
 │   │       │   └── *.md             # Error patterns
@@ -262,6 +274,8 @@ vault/
 │   │       ├── files/
 │   │       │   ├── files.md         # Category index
 │   │       │   └── *.md             # File-specific knowledge
+│   │       ├── sessions/            # Session summary notes
+│   │       │   └── *.md             # {date}_{session_id}.md
 │   │       └── canvases/
 │   │           ├── dashboard.canvas # Grid layout by folder type
 │   │           ├── timeline.canvas  # Decisions chronologically
@@ -272,7 +286,7 @@ vault/
 │   └── templates/                   # Note templates
 ```
 
-> **Note**: Session data is stored ephemerally in `~/.cc-obsidian-mem/sessions/` during active sessions and cleaned up when sessions end. Only persistent knowledge is stored in the vault.
+> **Note**: Session data is stored ephemerally in `~/.cc-obsidian-mem/sessions/` during active sessions (including `{session_id}.json` for state and `{session_id}.exploration.jsonl` for exploration tracking) and cleaned up when sessions end. Only persistent knowledge is stored in the vault.
 
 ### Note Linking
 
@@ -367,11 +381,31 @@ cc-obsidian-mem/
 │   │   └── scripts/         # Hook scripts
 │   ├── scripts/             # Utility scripts
 │   ├── skills/              # Skill definitions
+│   ├── tests/               # Test files
 │   └── src/
-│       ├── mcp-server/      # MCP server
-│       ├── services/        # AI services
-│       └── shared/          # Shared utilities
+│       ├── vault/           # Vault management (read/write/search), canvas generation
+│       ├── summarizer/      # AI-powered knowledge extraction
+│       ├── mcp-server/      # MCP tools (mem_search, mem_write, etc.)
+│       ├── session-end/     # Background session processing
+│       ├── sqlite/          # SQLite database operations
+│       ├── context/         # Context injection for prompts
+│       ├── sdk/             # SDK agent integration
+│       ├── shared/          # Types, config, validation, logging
+│       ├── cli/             # Setup CLI
+│       ├── fallback/        # JSON fallback storage
+│       └── worker/          # Background worker service
 ```
+
+### Topic-Based Filenames (Deduplication)
+
+Knowledge notes use **topic-based filenames** instead of date-prefixed filenames. This prevents duplicate notes on the same topic:
+
+- Notes are named `authentication-bug.md` instead of `2026-01-15_authentication-bug.md`
+- When new knowledge matches an existing topic, it's **appended** to the existing note
+- Each entry within a note has a timestamp header (`## Entry: YYYY-MM-DD HH:MM`)
+- Matching uses exact slug comparison within the same category (case-insensitive)
+
+**Migration for existing vaults**: Existing date-prefixed notes continue to work. New knowledge will use topic-based filenames. You can manually merge duplicate notes if desired.
 
 ### Running Tests
 

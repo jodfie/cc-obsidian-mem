@@ -1,178 +1,105 @@
-import * as fs from 'fs';
-import * as path from 'path';
-import * as os from 'os';
-import type { Config } from './types.js';
+/**
+ * Configuration management for cc-obsidian-mem
+ * Loads config from ~/.cc-obsidian-mem/config.json with defaults
+ */
+
+import { readFileSync, existsSync } from "fs";
+import { join } from "path";
+import { homedir } from "os";
+import type { Config } from "./types.js";
+
+const CONFIG_DIR = join(homedir(), ".cc-obsidian-mem");
+const CONFIG_FILE = join(CONFIG_DIR, "config.json");
+export const LOCKS_DIR = join(CONFIG_DIR, "locks");
 
 const DEFAULT_CONFIG: Config = {
-  vault: {
-    path: path.join(os.homedir(), 'ObsidianVault'),
-    memFolder: '_claude-mem',
-  },
-  capture: {
-    fileEdits: true,
-    bashCommands: true,
-    bashOutput: {
-      enabled: true,
-      maxLength: 5000,
-    },
-    errors: true,
-    decisions: true,
-  },
-  summarization: {
-    enabled: true,
-    model: 'sonnet', // Agent SDK uses simple names: 'sonnet', 'opus', 'haiku'
-    sessionSummary: true,
-    errorSummary: true,
-    timeout: 180000, // 3 minutes default
-  },
-  contextInjection: {
-    enabled: true,
-    maxTokens: 4000,
-    includeRelatedErrors: true,
-    includeProjectPatterns: true,
-  },
-  canvas: {
-    enabled: false,       // OFF by default - explicit opt-in required
-    autoGenerate: false,  // Don't auto-generate on mem_project_context
-    updateStrategy: 'skip', // Don't overwrite existing canvases
-  },
-  logging: {
-    verbose: false,      // OFF by default - enables debug logging when true
-    logDir: os.tmpdir(), // Default to system temp directory
-  },
+	vault: {
+		path: join(homedir(), "_claude-mem"),
+		memFolder: "_claude-mem",
+	},
+	sqlite: {
+		path: join(CONFIG_DIR, "sessions.db"),
+		retention: {
+			sessions: 50,
+			orphan_timeout_hours: 24,
+			file_reads_per_file: 5,
+		},
+		max_output_size: 100 * 1024, // 100KB
+	},
+	logging: {
+		verbose: false,
+		logDir: undefined, // Falls back to os.tmpdir()
+	},
+	canvas: {
+		enabled: false,
+		autoGenerate: false,
+		updateStrategy: "skip",
+	},
+	processing: {
+		stalenessTimeoutMinutes: 30,
+		pidValidationTimeoutMs: 500,
+		spawnVerifyDelayMs: 100,
+	},
 };
 
-let cachedConfig: Config | null = null;
-
 /**
- * Get the path to the config file
- */
-export function getConfigPath(): string {
-  return process.env.CONFIG_PATH || path.join(os.homedir(), '.cc-obsidian-mem', 'config.json');
-}
-
-/**
- * Get the path to the config directory
- */
-export function getConfigDir(): string {
-  return path.dirname(getConfigPath());
-}
-
-/**
- * Load configuration from file, merging with defaults
+ * Load configuration from file with defaults
  */
 export function loadConfig(): Config {
-  if (cachedConfig) {
-    return cachedConfig;
-  }
+	if (!existsSync(CONFIG_FILE)) {
+		return DEFAULT_CONFIG;
+	}
 
-  const configPath = getConfigPath();
-
-  if (!fs.existsSync(configPath)) {
-    // Return defaults if no config file exists
-    cachedConfig = DEFAULT_CONFIG;
-    return cachedConfig;
-  }
-
-  try {
-    const fileContent = fs.readFileSync(configPath, 'utf-8');
-    const userConfig = JSON.parse(fileContent) as Partial<Config>;
-
-    // Deep merge with defaults
-    cachedConfig = deepMerge(DEFAULT_CONFIG, userConfig);
-    return cachedConfig;
-  } catch (error) {
-    console.error(`Failed to load config from ${configPath}:`, error);
-    cachedConfig = DEFAULT_CONFIG;
-    return cachedConfig;
-  }
+	try {
+		const userConfig = JSON.parse(readFileSync(CONFIG_FILE, "utf-8"));
+		return mergeConfig(DEFAULT_CONFIG, userConfig);
+	} catch (error) {
+		console.warn(
+			`Failed to load config from ${CONFIG_FILE}, using defaults:`,
+			error
+		);
+		return DEFAULT_CONFIG;
+	}
 }
 
 /**
- * Save configuration to file
+ * Deep merge user config with defaults
  */
-export function saveConfig(config: Config): void {
-  const configPath = getConfigPath();
-  const configDir = getConfigDir();
-
-  // Ensure config directory exists
-  if (!fs.existsSync(configDir)) {
-    fs.mkdirSync(configDir, { recursive: true });
-  }
-
-  fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
-  cachedConfig = config;
+function mergeConfig(defaults: Config, user: Partial<Config>): Config {
+	return {
+		vault: { ...defaults.vault, ...user.vault },
+		sqlite: {
+			...defaults.sqlite,
+			...user.sqlite,
+			retention: {
+				...defaults.sqlite.retention,
+				...user.sqlite?.retention,
+			},
+		},
+		logging: { ...defaults.logging, ...user.logging },
+		canvas: { ...defaults.canvas, ...user.canvas },
+		processing: { ...defaults.processing!, ...user.processing },
+		defaultProject: user.defaultProject ?? defaults.defaultProject,
+	};
 }
 
 /**
- * Get the full path to the memory folder in the vault
+ * Get config directory path
  */
-export function getMemFolderPath(config?: Config): string {
-  const cfg = config || loadConfig();
-  return path.join(cfg.vault.path, cfg.vault.memFolder);
+export function getConfigDir(): string {
+	return CONFIG_DIR;
 }
 
 /**
- * Get the path to a project's folder in the vault
+ * Environment variable set when spawning claude from SDK agent or summarizer
+ * to prevent recursive hook execution
  */
-export function getProjectPath(projectName: string, config?: Config): string {
-  return path.join(getMemFolderPath(config), 'projects', sanitizeProjectName(projectName));
-}
+export const AGENT_SESSION_MARKER = "CC_MEM_AGENT_SESSION";
 
 /**
- * Sanitize project name for use as folder name
+ * Check if current session is an agent-spawned session
+ * @returns true if running in an agent session (should skip hooks)
  */
-export function sanitizeProjectName(name: string): string {
-  return name
-    .replace(/[^a-zA-Z0-9-_]/g, '_')
-    .replace(/_+/g, '_')
-    .toLowerCase();
-}
-
-/**
- * Deep merge two objects
- */
-function deepMerge(target: Config, source: Partial<Config>): Config {
-  const result = JSON.parse(JSON.stringify(target)) as Config;
-
-  if (source.vault) {
-    result.vault = { ...result.vault, ...source.vault };
-  }
-  if (source.capture) {
-    result.capture = {
-      ...result.capture,
-      ...source.capture,
-      bashOutput: source.capture.bashOutput
-        ? { ...result.capture.bashOutput, ...source.capture.bashOutput }
-        : result.capture.bashOutput,
-    };
-  }
-  if (source.summarization) {
-    result.summarization = { ...result.summarization, ...source.summarization };
-  }
-  if (source.contextInjection) {
-    result.contextInjection = { ...result.contextInjection, ...source.contextInjection };
-  }
-  if (source.canvas) {
-    result.canvas = { ...result.canvas, ...source.canvas };
-  }
-  if (source.logging) {
-    result.logging = { ...result.logging, ...source.logging };
-  }
-
-  return result;
-}
-
-/**
- * Clear the config cache (useful for testing)
- */
-export function clearConfigCache(): void {
-  cachedConfig = null;
-}
-
-/**
- * Get default config (useful for setup wizard)
- */
-export function getDefaultConfig(): Config {
-  return { ...DEFAULT_CONFIG };
+export function isAgentSession(): boolean {
+	return process.env[AGENT_SESSION_MARKER] === "1";
 }

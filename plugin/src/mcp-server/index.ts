@@ -1,785 +1,824 @@
 #!/usr/bin/env bun
 
+/**
+ * MCP Server for cc-obsidian-mem
+ * Provides mem_* tools for interacting with the knowledge base
+ */
+
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import * as z from "zod";
-import { VaultManager } from "./utils/vault.js";
-import { loadConfig, getProjectPath } from "../shared/config.js";
+import { loadConfig } from "../shared/config.js";
 import { createLogger } from "../shared/logger.js";
-import type { SearchResult, ProjectContext, Note } from "../shared/types.js";
+import { validatePath } from "../shared/security.js";
 import {
-  generateProjectCanvases,
-  detectFolder,
-  type CanvasNote,
-} from "./utils/canvas.js";
-import * as path from "path";
+	searchNotes,
+	readNote,
+	writeNote,
+	listProjects,
+	getProjectContext,
+	getProjectPath,
+	getMemFolderPath,
+	findExistingTopicNote,
+	appendToExistingNote,
+	ensureProjectStructure,
+	slugifyProjectName,
+} from "../vault/vault-manager.js";
+import {
+	generateAllCanvases,
+	generateDashboardCanvas,
+	generateTimelineCanvas,
+	generateGraphCanvas,
+} from "../vault/canvas.js";
+import {
+	buildFrontmatter,
+	generateFilename,
+	getParentLink,
+	noteTypeToFolder,
+} from "../vault/note-builder.js";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, renameSync } from "fs";
+import { join, dirname, basename } from "path";
+import type { NoteType } from "../shared/types.js";
 
 type TextContent = { type: "text"; text: string };
 type ToolResult = { content: TextContent[]; isError?: boolean };
 
 async function main() {
-  const config = loadConfig();
-  const vault = new VaultManager(config.vault.path, config.vault.memFolder);
-  const logger = createLogger('mcp-server'); // No session ID for MCP server
+	const config = loadConfig();
+	const logger = createLogger({
+		logDir: config.logging?.logDir,
+		verbose: config.logging?.verbose,
+	});
 
-  logger.info('MCP server starting');
+	logger.info("MCP server starting");
 
-  // Ensure vault structure exists
-  await vault.ensureStructure();
+	const server = new McpServer({
+		name: "obsidian-mem",
+		version: "1.0.0",
+	});
 
-  const server = new McpServer({
-    name: "obsidian-mem",
-    version: "0.6.0",
-  });
+	// ========================================================================
+	// mem_search - Search the knowledge base
+	// ========================================================================
+	server.registerTool(
+		"mem_search",
+		{
+			title: "Search Memory",
+			description:
+				'Step 1: Search the knowledge base. Returns lightweight index with titles, types, and paths. ALWAYS search first before reading full notes. Use mem_read only for relevant results after filtering. Tip: Use type="knowledge" to search all knowledge notes (qa, explanation, decision, research, learning).',
+			inputSchema: {
+				query: z.string().describe("Search query - natural language or keywords"),
+				project: z.string().optional().describe("Filter by project name"),
+				type: z
+					.enum(["error", "decision", "pattern", "file", "learning", "knowledge"])
+					.optional()
+					.describe("Filter by note type"),
+				tags: z.array(z.string()).optional().describe("Filter by tags"),
+				limit: z.number().default(10).describe("Maximum number of results"),
+			},
+		},
+		async ({ query, project, type, tags, limit }): Promise<ToolResult> => {
+			logger.debug("mem_search called", { query, project, type });
 
-  // Tool: mem_search - Search the knowledge base
-  server.registerTool(
-    "mem_search",
-    {
-      title: "Search Memory",
-      description:
-        "Step 1: Search the knowledge base. Returns lightweight index with titles, types, and paths. ALWAYS search first before reading full notes. Use mem_read only for relevant results after filtering. Tip: Use type='knowledge' to search all knowledge notes (qa, explanation, decision, research, learning).",
-      inputSchema: {
-        query: z
-          .string()
-          .describe("Search query - natural language or keywords"),
-        project: z.string().optional().describe("Filter by project name"),
-        type: z
-          .enum([
-            "error",
-            "decision",
-            "pattern",
-            "file",
-            "learning",
-            "knowledge",
-          ])
-          .optional()
-          .describe(
-            'Filter by note type. Use "knowledge" to search all knowledge notes (qa, explanation, decision, research, learning)'
-          ),
-        tags: z.array(z.string()).optional().describe("Filter by tags"),
-        limit: z.number().default(10).describe("Maximum number of results"),
-      },
-    },
-    async ({ query, project, type, tags, limit }): Promise<ToolResult> => {
-      logger.debug('mem_search called', { queryLength: query.length, project, type, tagsCount: tags?.length, limit });
-      try {
-        // Map NoteType to knowledge_type for knowledge search
-        // 'knowledge' type searches ALL knowledge types (qa, explanation, decision, research, learning)
-        const knowledgeTypeMap: Record<string, string | string[] | undefined> =
-          {
-            knowledge: undefined, // undefined = search all knowledge types
-            learning: "learning",
-            decision: "decision",
-            // These types only exist in regular notes, so skip knowledge search
-            session: undefined,
-            error: undefined,
-            pattern: undefined,
-            file: undefined,
-          };
+			try {
+				const results = searchNotes(query, { type, project, limit, tags });
 
-        // Determine what to search
-        const isKnowledgeOnlySearch = type === "knowledge";
-        const regularNoteType = isKnowledgeOnlySearch ? undefined : type;
+				if (results.length === 0) {
+					return {
+						content: [{ type: "text", text: "No results found." }],
+					};
+				}
 
-        // Search regular notes (skip if searching only knowledge)
-        let regularResults: SearchResult[] = [];
-        if (!isKnowledgeOnlySearch) {
-          regularResults = await vault.searchNotes(query, {
-            project,
-            type: regularNoteType,
-            tags,
-            limit,
-            lightweight: true,
-          });
-        }
+				const formatted = results
+					.map(
+						(r, i) =>
+							`${i + 1}. **${r.title}** (${r.type})\n   Path: ${r.path}\n   ${r.snippet}`
+					)
+					.join("\n\n");
 
-        // Only search knowledge if type filter allows it
-        // - No type filter: search both regular notes and all knowledge
-        // - 'knowledge' type: search all knowledge types (skip regular notes)
-        // - 'learning' or 'decision': search specific knowledge type
-        // - Other types (session, error, etc.): skip knowledge search
-        let knowledgeResults: SearchResult[] = [];
-        const shouldSearchKnowledge =
-          !type ||
-          type === "knowledge" ||
-          type === "learning" ||
-          type === "decision";
+				return {
+					content: [{ type: "text", text: `Found ${results.length} results:\n\n${formatted}` }],
+				};
+			} catch (error) {
+				logger.error("mem_search error", { error });
+				return {
+					content: [{ type: "text", text: `Search error: ${error}` }],
+					isError: true,
+				};
+			}
+		}
+	);
 
-        if (shouldSearchKnowledge) {
-          const knowledgeType =
-            type === "knowledge" || !type
-              ? undefined // search all knowledge types
-              : (knowledgeTypeMap[type] as
-                  | "qa"
-                  | "explanation"
-                  | "decision"
-                  | "research"
-                  | "learning"
-                  | undefined);
+	// ========================================================================
+	// mem_read - Read full note content
+	// ========================================================================
+	server.registerTool(
+		"mem_read",
+		{
+			title: "Read Note",
+			description:
+				'Step 2: Read full note content. Only call AFTER filtering with mem_search. Returns complete markdown with frontmatter. Use "section" param to extract specific headings or blocks.',
+			inputSchema: {
+				path: z.string().describe("Path to the note (relative to vault or absolute)"),
+				section: z
+					.string()
+					.optional()
+					.describe('Optional heading or block ID to extract (e.g., "Summary" or "^block-id")'),
+			},
+		},
+		async ({ path: notePath, section }): Promise<ToolResult> => {
+			logger.debug("mem_read called", { path: notePath, section });
 
-          knowledgeResults = await vault.searchKnowledge(query, {
-            project,
-            knowledgeType,
-            limit: isKnowledgeOnlySearch
-              ? limit
-              : Math.max(5, limit - regularResults.length),
-            lightweight: true,
-          });
-        }
+			try {
+				// Validate path is within vault
+				validatePath(notePath, config.vault.path);
 
-        // Combine and sort by score
-        const allResults = [...regularResults, ...knowledgeResults]
-          .sort((a, b) => b.score - a.score)
-          .slice(0, limit);
+				const note = readNote(notePath);
+				if (!note) {
+					return {
+						content: [{ type: "text", text: `Note not found: ${notePath}` }],
+						isError: true,
+					};
+				}
 
-        const output = formatSearchResults(allResults);
+				let content = note.rawContent;
 
-        return {
-          content: [{ type: "text", text: output }],
-        };
-      } catch (error) {
-        return {
-          content: [{ type: "text", text: `Search failed: ${error}` }],
-          isError: true,
-        };
-      }
-    }
-  );
+				// Extract section if specified
+				if (section) {
+					const sectionMatch = content.match(
+						new RegExp(`## ${section}[\\s\\S]*?(?=\\n## |$)`, "i")
+					);
+					if (sectionMatch) {
+						content = sectionMatch[0];
+					}
+				}
 
-  // Tool: mem_read - Read a specific note
-  server.registerTool(
-    "mem_read",
-    {
-      title: "Read Memory Note",
-      description:
-        "Step 2: Read full note content. Only call AFTER filtering with mem_search. Returns complete markdown with frontmatter. Use 'section' param to extract specific headings or blocks.",
-      inputSchema: {
-        path: z
-          .string()
-          .describe("Path to the note (relative to vault or absolute)"),
-        section: z
-          .string()
-          .optional()
-          .describe(
-            'Optional heading or block ID to extract (e.g., "Summary" or "^block-id")'
-          ),
-      },
-    },
-    async ({ path, section }): Promise<ToolResult> => {
-      try {
-        const note = await vault.readNote(path, section);
-        const output = formatNote(note);
+				return {
+					content: [{ type: "text", text: content }],
+				};
+			} catch (error) {
+				logger.error("mem_read error", { error });
+				return {
+					content: [{ type: "text", text: `Read error: ${error}` }],
+					isError: true,
+				};
+			}
+		}
+	);
 
-        return {
-          content: [{ type: "text", text: output }],
-        };
-      } catch (error) {
-        return {
-          content: [{ type: "text", text: `Failed to read note: ${error}` }],
-          isError: true,
-        };
-      }
-    }
-  );
+	// ========================================================================
+	// mem_write - Create a knowledge note (with topic deduplication)
+	// ========================================================================
+	server.registerTool(
+		"mem_write",
+		{
+			title: "Write Note",
+			description:
+				"Create or update a note in the knowledge base. Use for saving decisions, patterns, learnings, or custom content. Automatically appends to existing notes with the same topic.",
+			inputSchema: {
+				type: z
+					.enum(["error", "decision", "pattern", "file", "learning"])
+					.describe("Type of note to create"),
+				title: z.string().min(1).describe("Title for the note"),
+				content: z.string().describe("Markdown content for the note"),
+				project: z.string().optional().describe("Project name to associate with"),
+				tags: z.array(z.string()).optional().describe("Additional tags"),
+				status: z
+					.enum(["active", "superseded", "draft"])
+					.optional()
+					.describe("Note status (default: active)"),
+			},
+		},
+		async ({ type, title, content, project, tags, status }): Promise<ToolResult> => {
+			logger.debug("mem_write called", { type, title, project });
 
-  // Tool: mem_write - Write or update a note
-  server.registerTool(
-    "mem_write",
-    {
-      title: "Write Memory Note",
-      description:
-        "Create or update a note in the knowledge base. Use for saving decisions, patterns, learnings, or custom content.",
-      inputSchema: {
-        type: z
-          .enum(["error", "decision", "pattern", "file", "learning"])
-          .describe("Type of note to create"),
-        title: z.string().describe("Title for the note"),
-        content: z.string().describe("Markdown content for the note"),
-        project: z
-          .string()
-          .optional()
-          .describe("Project name to associate with"),
-        tags: z.array(z.string()).optional().describe("Additional tags"),
-        path: z
-          .string()
-          .optional()
-          .describe("Custom path (auto-generated if not provided)"),
-        append: z
-          .boolean()
-          .optional()
-          .describe("Append to existing note instead of replacing"),
-        status: z
-          .enum(["active", "superseded", "draft"])
-          .optional()
-          .describe("Note status (default: active)"),
-        supersedes: z
-          .array(z.string())
-          .optional()
-          .describe(
-            'Wikilinks to notes this supersedes (e.g., ["[[path/to/old-note]]"])'
-          ),
-      },
-    },
-    async ({
-      type,
-      title,
-      content,
-      project,
-      tags,
-      path,
-      append,
-      status,
-      supersedes,
-    }): Promise<ToolResult> => {
-      try {
-        // Warn if supersedes is provided - should use mem_supersede instead
-        let warning = "";
-        if (supersedes && supersedes.length > 0) {
-          warning =
-            "\n\nNote: `supersedes` was provided but mem_write only creates one-way links. " +
-            "Use mem_supersede to create bidirectional supersedes/superseded_by links.";
-        }
+			// Input validation
+			if (!title || title.trim().length === 0) {
+				return {
+					content: [{ type: "text", text: "Error: title cannot be empty" }],
+					isError: true,
+				};
+			}
 
-        const result = await vault.writeNote({
-          type,
-          title,
-          content,
-          project,
-          tags,
-          path,
-          append,
-          status,
-          supersedes,
-        });
+			try {
+				const projectName = project || config.defaultProject || "default";
+				const folder = noteTypeToFolder(type as NoteType);
 
-        const action = result.created ? "Created" : "Updated";
-        return {
-          content: [
-            { type: "text", text: `${action} note: ${result.path}${warning}` },
-          ],
-        };
-      } catch (error) {
-        return {
-          content: [{ type: "text", text: `Failed to write note: ${error}` }],
-          isError: true,
-        };
-      }
-    }
-  );
+				// Ensure project structure exists
+				const projectSlug = ensureProjectStructure(projectName);
+				const projectPath = getProjectPath(projectSlug);
 
-  // Tool: mem_write_knowledge - Write knowledge extracted from conversations
-  server.registerTool(
-    "mem_write_knowledge",
-    {
-      title: "Write Knowledge Note",
-      description:
-        "Write knowledge extracted from conversations (Q&A, explanations, research, learnings). " +
-        "Routes to /research folder (decisions go to /decisions). Sets knowledge_type in frontmatter for filtered searches.",
-      inputSchema: {
-        type: z
-          .enum(["qa", "explanation", "decision", "research", "learning"])
-          .describe(
-            "Type of knowledge: qa (question/answer), explanation (concept explained), decision (choice made), research (web/doc research), learning (insight/tip)"
-          ),
-        title: z.string().describe("Title for the knowledge note"),
-        context: z
-          .string()
-          .describe("When this knowledge is useful (1 sentence)"),
-        content: z
-          .string()
-          .describe("Main content/summary of the knowledge"),
-        keyPoints: z
-          .array(z.string())
-          .optional()
-          .describe("Key actionable points (2-5 items)"),
-        topics: z
-          .array(z.string())
-          .optional()
-          .describe("Topic tags for categorization (2-5 items)"),
-        project: z.string().describe("Project name to associate with"),
-        sourceUrl: z
-          .string()
-          .optional()
-          .describe("Source URL if from web research"),
-        sourceSession: z
-          .string()
-          .optional()
-          .describe("Session ID if from conversation"),
-      },
-    },
-    async ({
-      type,
-      title,
-      context,
-      content,
-      keyPoints,
-      topics,
-      project,
-      sourceUrl,
-      sourceSession,
-    }): Promise<ToolResult> => {
-      try {
-        const result = await vault.writeKnowledge(
-          {
-            type,
-            title,
-            context,
-            content,
-            keyPoints: keyPoints || [],
-            topics: topics || [],
-            sourceUrl,
-            sourceSession,
-          },
-          project
-        );
+				// Check for existing note with same topic (deduplication)
+				const existingNotePath = findExistingTopicNote(projectPath, folder, title);
 
-        const folder = type === "decision" ? "decisions" : "research";
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Created ${type} note in ${folder}/: ${result.path}`,
-            },
-          ],
-        };
-      } catch (error) {
-        return {
-          content: [
-            { type: "text", text: `Failed to write knowledge: ${error}` },
-          ],
-          isError: true,
-        };
-      }
-    }
-  );
+				if (existingNotePath) {
+					// Append to existing note
+					const success = appendToExistingNote(existingNotePath, content, tags || []);
+					if (success) {
+						return {
+							content: [{ type: "text", text: `Appended to existing note: ${existingNotePath}` }],
+						};
+					} else {
+						return {
+							content: [{ type: "text", text: "Failed to append to existing note" }],
+							isError: true,
+						};
+					}
+				}
 
-  // Tool: mem_supersede - Supersede an existing note with a new one
-  server.registerTool(
-    "mem_supersede",
-    {
-      title: "Supersede Note",
-      description:
-        "Create a new note that supersedes an existing one. Automatically creates bidirectional links: the old note is marked as superseded with a link to the new note, and the new note links back to the old one.",
-      inputSchema: {
-        oldNotePath: z
-          .string()
-          .describe(
-            'Path to the note being superseded (relative to vault, e.g., "projects/my-project/research/old-note.md")'
-          ),
-        type: z
-          .enum(["error", "decision", "pattern", "file", "learning"])
-          .describe("Type of new note to create"),
-        title: z.string().describe("Title for the new note"),
-        content: z.string().describe("Markdown content for the new note"),
-        project: z
-          .string()
-          .optional()
-          .describe("Project name to associate with"),
-        tags: z.array(z.string()).optional().describe("Additional tags"),
-      },
-    },
-    async ({
-      oldNotePath,
-      type,
-      title,
-      content,
-      project,
-      tags,
-    }): Promise<ToolResult> => {
-      try {
-        const result = await vault.supersedeNote(oldNotePath, {
-          type,
-          title,
-          content,
-          project,
-          tags,
-        });
+				// Create new note
+				const filename = generateFilename(title);
+				const notePath = join(projectPath, folder, filename);
 
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Superseded note:\n- Old (now superseded): ${result.oldPath}\n- New: ${result.newPath}\n\nBidirectional links created.`,
-            },
-          ],
-        };
-      } catch (error) {
-        return {
-          content: [
-            { type: "text", text: `Failed to supersede note: ${error}` },
-          ],
-          isError: true,
-        };
-      }
-    }
-  );
+				// Ensure directory exists
+				const dir = dirname(notePath);
+				if (!existsSync(dir)) {
+					mkdirSync(dir, { recursive: true });
+				}
 
-  // Tool: mem_project_context - Get context for current project
-  server.registerTool(
-    "mem_project_context",
-    {
-      title: "Get Project Context",
-      description:
-        "Retrieve summary context for a project including unresolved errors, active decisions, and patterns. Useful at the start of a session to understand project history. Returns full lists - for detailed notes, use mem_search + mem_read workflow.",
-      inputSchema: {
-        project: z.string().describe("Project name"),
-        includeErrors: z
-          .boolean()
-          .default(true)
-          .describe("Include unresolved errors"),
-        includeDecisions: z
-          .boolean()
-          .default(true)
-          .describe("Include recent decisions"),
-        includePatterns: z
-          .boolean()
-          .default(true)
-          .describe("Include relevant patterns"),
-        generateCanvas: z
-          .boolean()
-          .optional()
-          .describe(
-            "Generate/update project canvases (requires canvas.enabled in config)"
-          ),
-      },
-    },
-    async ({
-      project,
-      includeErrors,
-      includeDecisions,
-      includePatterns,
-      generateCanvas,
-    }): Promise<ToolResult> => {
-      try {
-        const context = await vault.getProjectContext(project, {
-          includeErrors,
-          includeDecisions,
-          includePatterns,
-        });
+				const frontmatter = buildFrontmatter({
+					type: type as NoteType,
+					title,
+					project: projectSlug,
+					tags,
+					status: status as any,
+					parent: getParentLink(projectSlug, folder),
+				});
 
-        let output = formatProjectContext(context);
+				// Add entry_count for new notes
+				(frontmatter as any).entry_count = 1;
 
-        // Handle canvas generation
-        // generateCanvas=true: force generate
-        // generateCanvas=false: force skip (per-call opt-out)
-        // generateCanvas=undefined: use autoGenerate config
-        const shouldGenerateCanvas =
-          generateCanvas ?? (config.canvas?.enabled && config.canvas?.autoGenerate);
+				const success = writeNote(notePath, frontmatter, content);
 
-        if (shouldGenerateCanvas) {
-          if (!config.canvas?.enabled) {
-            output +=
-              "\n\n> Canvas generation requested but disabled in config.";
-          } else {
-            try {
-              const projectPath = getProjectPath(project, config);
-              const notes = await vault.getProjectNotes(project);
+				if (success) {
+					return {
+						content: [{ type: "text", text: `Note created: ${notePath}` }],
+					};
+				} else {
+					return {
+						content: [{ type: "text", text: "Failed to write note" }],
+						isError: true,
+					};
+				}
+			} catch (error) {
+				logger.error("mem_write error", { error });
+				return {
+					content: [{ type: "text", text: `Write error: ${error}` }],
+					isError: true,
+				};
+			}
+		}
+	);
 
-              if (notes.length > 0) {
-                const canvasNotes: CanvasNote[] = notes.map((note) => ({
-                  path: note.path,
-                  title: note.title,
-                  folder: detectFolder(note.path),
-                  status: note.frontmatter.status || "active",
-                  created: note.frontmatter.created,
-                }));
+	// ========================================================================
+	// mem_write_knowledge - Write knowledge extracted from conversations (with deduplication)
+	// ========================================================================
+	server.registerTool(
+		"mem_write_knowledge",
+		{
+			title: "Write Knowledge",
+			description:
+				"Write knowledge extracted from conversations (Q&A, explanations, research, learnings). Routes to /research folder. Sets knowledge_type in frontmatter for filtered searches. Automatically appends to existing notes with the same topic.",
+			inputSchema: {
+				type: z
+					.enum(["qa", "explanation", "decision", "research", "learning"])
+					.describe("Type of knowledge"),
+				title: z.string().min(1).describe("Title for the knowledge note"),
+				context: z.string().describe("When this knowledge is useful (1 sentence)"),
+				content: z.string().min(1).describe("Main content/summary of the knowledge"),
+				project: z.string().min(1).describe("Project name to associate with"),
+				topics: z.array(z.string()).optional().describe("Topic tags for categorization (2-5 items)"),
+				keyPoints: z.array(z.string()).optional().describe("Key actionable points (2-5 items)"),
+			},
+		},
+		async ({ type, title, context, content, project, topics, keyPoints }): Promise<ToolResult> => {
+			logger.debug("mem_write_knowledge called", { type, title, project });
 
-                const canvasDir = path.join(projectPath, "canvases");
-                const updateStrategy = config.canvas.updateStrategy || "skip";
+			// Input validation
+			if (!title || title.trim().length === 0) {
+				return {
+					content: [{ type: "text", text: "Error: title cannot be empty" }],
+					isError: true,
+				};
+			}
+			if (!content || content.trim().length === 0) {
+				return {
+					content: [{ type: "text", text: "Error: content cannot be empty" }],
+					isError: true,
+				};
+			}
+			if (!project || project.trim().length === 0) {
+				return {
+					content: [{ type: "text", text: "Error: project cannot be empty" }],
+					isError: true,
+				};
+			}
 
-                const result = generateProjectCanvases(
-                  project,
-                  canvasNotes,
-                  canvasDir,
-                  updateStrategy,
-                  false // don't force
-                );
+			try {
+				const folder = "research";
 
-                const generated: string[] = [];
-                if (result.dashboard)
-                  generated.push(`Dashboard: ${result.dashboard}`);
-                if (result.timeline)
-                  generated.push(`Timeline: ${result.timeline}`);
-                if (result.graph) generated.push(`Graph: ${result.graph}`);
+				// Ensure project structure exists
+				const projectSlug = ensureProjectStructure(project);
+				const projectPath = getProjectPath(projectSlug);
 
-                if (generated.length > 0) {
-                  output += `\n\n## Generated Canvases\n${generated
-                    .map((g) => `- ${g}`)
-                    .join("\n")}`;
-                }
-              }
-            } catch (canvasError) {
-              output += `\n\n> Canvas generation failed: ${canvasError}`;
-            }
-          }
-        }
+				// Build content with key points if provided
+				let fullContent = `## Context\n${context}\n\n## Content\n${content}`;
 
-        return {
-          content: [{ type: "text", text: output }],
-        };
-      } catch (error) {
-        return {
-          content: [
-            { type: "text", text: `Failed to get project context: ${error}` },
-          ],
-          isError: true,
-        };
-      }
-    }
-  );
+				if (keyPoints && keyPoints.length > 0) {
+					fullContent += "\n\n## Key Points\n";
+					fullContent += keyPoints.map((p) => `- ${p}`).join("\n");
+				}
 
-  // Tool: mem_list_projects - List all projects
-  server.registerTool(
-    "mem_list_projects",
-    {
-      title: "List Projects",
-      description:
-        "List all projects that have been tracked in the memory system",
-      inputSchema: {},
-    },
-    async (): Promise<ToolResult> => {
-      try {
-        const projects = await vault.listProjects();
+				// Check for existing note with same topic (deduplication)
+				const existingNotePath = findExistingTopicNote(projectPath, folder, title);
 
-        if (projects.length === 0) {
-          return {
-            content: [
-              { type: "text", text: "No projects found in memory yet." },
-            ],
-          };
-        }
+				if (existingNotePath) {
+					// Append to existing note
+					const success = appendToExistingNote(existingNotePath, fullContent, topics || []);
+					if (success) {
+						return {
+							content: [{ type: "text", text: `Appended to existing knowledge note: ${existingNotePath}` }],
+						};
+					} else {
+						return {
+							content: [{ type: "text", text: "Failed to append to existing knowledge note" }],
+							isError: true,
+						};
+					}
+				}
 
-        const output = `## Projects in Memory\n\n${projects
-          .map((p) => `- ${p}`)
-          .join("\n")}`;
+				// Create new note
+				const filename = generateFilename(title);
+				const notePath = join(projectPath, folder, filename);
 
-        return {
-          content: [{ type: "text", text: output }],
-        };
-      } catch (error) {
-        return {
-          content: [
-            { type: "text", text: `Failed to list projects: ${error}` },
-          ],
-          isError: true,
-        };
-      }
-    }
-  );
+				// Ensure directory exists
+				const dir = dirname(notePath);
+				if (!existsSync(dir)) {
+					mkdirSync(dir, { recursive: true });
+				}
 
-  // Tool: mem_generate_canvas - Generate visualization canvases
-  server.registerTool(
-    "mem_generate_canvas",
-    {
-      title: "Generate Project Canvas",
-      description:
-        "Generate visualization canvases for a project (dashboard, timeline, graph). " +
-        "Requires canvas.enabled=true in config.",
-      inputSchema: {
-        project: z.string().describe("Project name"),
-        types: z
-          .array(z.enum(["dashboard", "timeline", "graph"]))
-          .optional()
-          .describe("Canvas types to generate (default: all)"),
-        force: z
-          .boolean()
-          .optional()
-          .describe("Overwrite existing canvases regardless of updateStrategy"),
-      },
-    },
-    async ({ project, types, force }): Promise<ToolResult> => {
-      try {
-        // Check if canvas is enabled
-        if (!config.canvas?.enabled) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: "Canvas generation is disabled. Enable it in config: canvas.enabled = true",
-              },
-            ],
-            isError: true,
-          };
-        }
+				const frontmatter = buildFrontmatter({
+					type: "learning",
+					title,
+					project: projectSlug,
+					tags: topics,
+					knowledge_type: type,
+					parent: getParentLink(projectSlug, folder),
+				});
 
-        // Get all notes for the project
-        const projectPath = getProjectPath(project, config);
-        const notes = await vault.getProjectNotes(project);
+				// Add entry_count for new notes
+				(frontmatter as any).entry_count = 1;
 
-        if (notes.length === 0) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: `No notes found for project "${project}". Create some notes first.`,
-              },
-            ],
-          };
-        }
+				const success = writeNote(notePath, frontmatter, fullContent);
 
-        // Convert to CanvasNote format
-        const canvasNotes: CanvasNote[] = notes.map((note) => ({
-          path: note.path,
-          title: note.title,
-          folder: detectFolder(note.path),
-          status: note.frontmatter.status || "active",
-          created: note.frontmatter.created,
-        }));
+				if (success) {
+					return {
+						content: [{ type: "text", text: `Knowledge note created: ${notePath}` }],
+					};
+				} else {
+					return {
+						content: [{ type: "text", text: "Failed to write knowledge note" }],
+						isError: true,
+					};
+				}
+			} catch (error) {
+				logger.error("mem_write_knowledge error", { error });
+				return {
+					content: [{ type: "text", text: `Write error: ${error}` }],
+					isError: true,
+				};
+			}
+		}
+	);
 
-        // Generate canvases
-        const canvasDir = path.join(projectPath, "canvases");
-        const updateStrategy = config.canvas.updateStrategy || "skip";
+	// ========================================================================
+	// mem_supersede - Create note that supersedes an existing one
+	// ========================================================================
+	server.registerTool(
+		"mem_supersede",
+		{
+			title: "Supersede Note",
+			description:
+				"Create a new note that supersedes an existing one. Automatically creates bidirectional links: the old note is marked as superseded with a link to the new note, and the new note links back to the old one.",
+			inputSchema: {
+				oldNotePath: z.string().describe("Path to the note being superseded"),
+				type: z
+					.enum(["error", "decision", "pattern", "file", "learning"])
+					.describe("Type of new note to create"),
+				title: z.string().describe("Title for the new note"),
+				content: z.string().describe("Markdown content for the new note"),
+				project: z.string().optional().describe("Project name to associate with"),
+				tags: z.array(z.string()).optional().describe("Additional tags"),
+			},
+		},
+		async ({ oldNotePath, type, title, content, project, tags }): Promise<ToolResult> => {
+			logger.debug("mem_supersede called", { oldNotePath, type, title });
 
-        const result = generateProjectCanvases(
-          project,
-          canvasNotes,
-          canvasDir,
-          updateStrategy,
-          force || false,
-          types
-        );
+			try {
+				// Validate old note path
+				validatePath(oldNotePath, config.vault.path);
 
-        // Format output
-        const generated: string[] = [];
-        if (result.dashboard) generated.push(`- Dashboard: ${result.dashboard}`);
-        if (result.timeline) generated.push(`- Timeline: ${result.timeline}`);
-        if (result.graph) generated.push(`- Graph: ${result.graph}`);
+				// Read old note
+				const oldNote = readNote(oldNotePath);
+				if (!oldNote) {
+					return {
+						content: [{ type: "text", text: `Old note not found: ${oldNotePath}` }],
+						isError: true,
+					};
+				}
 
-        if (generated.length === 0) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: `No canvases generated (existing files skipped due to updateStrategy: "${updateStrategy}"). Use force=true to overwrite.`,
-              },
-            ],
-          };
-        }
+				const projectName = project || oldNote.frontmatter.project || config.defaultProject || "default";
+				const folder = noteTypeToFolder(type as NoteType);
+				const filename = generateFilename(title);
+				const projectPath = getProjectPath(projectName);
+				const newNotePath = join(projectPath, folder, filename);
 
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Generated ${generated.length} canvas(es) for project "${project}":\n${generated.join("\n")}`,
-            },
-          ],
-        };
-      } catch (error) {
-        return {
-          content: [
-            { type: "text", text: `Failed to generate canvases: ${error}` },
-          ],
-          isError: true,
-        };
-      }
-    }
-  );
+				// Create new note with supersedes link
+				const newFrontmatter = buildFrontmatter({
+					type: type as NoteType,
+					title,
+					project: projectName,
+					tags,
+					supersedes: [`[[${oldNotePath.replace(/\.md$/, "")}]]`],
+					parent: getParentLink(projectName, folder),
+				});
 
-  // Connect via stdio
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-}
+				const successNew = writeNote(newNotePath, newFrontmatter, content);
 
-// Formatting functions
+				// Update old note with superseded_by
+				if (successNew) {
+					oldNote.frontmatter.status = "superseded";
+					oldNote.frontmatter.superseded_by = `[[${newNotePath.replace(/\.md$/, "")}]]`;
+					writeNote(oldNotePath, oldNote.frontmatter, oldNote.content);
+				}
 
-function formatSearchResults(results: SearchResult[]): string {
-  if (results.length === 0) {
-    return "No results found.";
-  }
+				if (successNew) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: `Created new note: ${newNotePath}\nMarked as superseded: ${oldNotePath}`,
+							},
+						],
+					};
+				} else {
+					return {
+						content: [{ type: "text", text: "Failed to create superseding note" }],
+						isError: true,
+					};
+				}
+			} catch (error) {
+				logger.error("mem_supersede error", { error });
+				return {
+					content: [{ type: "text", text: `Supersede error: ${error}` }],
+					isError: true,
+				};
+			}
+		}
+	);
 
-  const lines: string[] = [`## Search Results (${results.length})\n`];
+	// ========================================================================
+	// mem_project_context - Get project summary
+	// ========================================================================
+	server.registerTool(
+		"mem_project_context",
+		{
+			title: "Project Context",
+			description:
+				"Retrieve summary context for a project including unresolved errors, active decisions, and patterns. Useful at the start of a session to understand project history.",
+			inputSchema: {
+				project: z.string().describe("Project name"),
+				includeErrors: z.boolean().default(true).describe("Include unresolved errors"),
+				includeDecisions: z.boolean().default(true).describe("Include recent decisions"),
+				includePatterns: z.boolean().default(true).describe("Include relevant patterns"),
+			},
+		},
+		async ({ project, includeErrors, includeDecisions, includePatterns }): Promise<ToolResult> => {
+			logger.debug("mem_project_context called", { project });
 
-  for (const result of results) {
-    lines.push(`### ${result.title}`);
-    lines.push(`**Type**: ${result.type} | **Path**: \`${result.path}\``);
-    if (result.metadata.project) {
-      lines.push(`**Project**: ${result.metadata.project}`);
-    }
-    if (result.metadata.tags && result.metadata.tags.length > 0) {
-      lines.push(
-        `**Tags**: ${result.metadata.tags.map((t) => `#${t}`).join(" ")}`
-      );
-    }
-    if (result.snippet) {
-      lines.push("");
-      lines.push(`> ${result.snippet}`);
-    }
-    lines.push("");
-  }
+			try {
+				const context = getProjectContext(project, {
+					includeErrors,
+					includeDecisions,
+					includePatterns,
+				});
 
-  return lines.join("\n");
-}
+				let output = `# Project Context: ${project}\n\n`;
 
-function formatNote(note: Note): string {
-  const lines: string[] = [];
+				if (includeDecisions && context.decisions.length > 0) {
+					output += "## Recent Decisions\n";
+					for (const d of context.decisions) {
+						output += `- **${d.title}**: ${d.snippet.substring(0, 100)}...\n`;
+					}
+					output += "\n";
+				}
 
-  lines.push(`# ${note.title}`);
-  lines.push("");
-  lines.push(`**Path**: \`${note.path}\``);
-  lines.push(`**Type**: ${note.frontmatter.type}`);
-  if (note.frontmatter.project) {
-    lines.push(`**Project**: ${note.frontmatter.project}`);
-  }
-  if (note.frontmatter.tags.length > 0) {
-    lines.push(
-      `**Tags**: ${note.frontmatter.tags.map((t) => `#${t}`).join(" ")}`
-    );
-  }
-  lines.push("");
-  lines.push("---");
-  lines.push("");
-  lines.push(note.content);
+				if (includePatterns && context.patterns.length > 0) {
+					output += "## Patterns\n";
+					for (const p of context.patterns) {
+						output += `- **${p.title}**: ${p.snippet.substring(0, 100)}...\n`;
+					}
+					output += "\n";
+				}
 
-  return lines.join("\n");
-}
+				if (includeErrors && context.errors.length > 0) {
+					output += "## Known Errors\n";
+					for (const e of context.errors) {
+						output += `- **${e.title}**: ${e.snippet.substring(0, 100)}...\n`;
+					}
+					output += "\n";
+				}
 
-function formatProjectContext(context: ProjectContext): string {
-  const lines: string[] = [];
+				if (
+					context.decisions.length === 0 &&
+					context.patterns.length === 0 &&
+					context.errors.length === 0
+				) {
+					output += "No knowledge found for this project yet.\n";
+				}
 
-  lines.push(`# Project: ${context.project}`);
-  lines.push("");
+				return {
+					content: [{ type: "text", text: output }],
+				};
+			} catch (error) {
+				logger.error("mem_project_context error", { error });
+				return {
+					content: [{ type: "text", text: `Context error: ${error}` }],
+					isError: true,
+				};
+			}
+		}
+	);
 
-  if (context.summary) {
-    lines.push("## Summary");
-    lines.push(context.summary);
-    lines.push("");
-  }
+	// ========================================================================
+	// mem_list_projects - List all tracked projects
+	// ========================================================================
+	server.registerTool(
+		"mem_list_projects",
+		{
+			title: "List Projects",
+			description: "List all projects that have been tracked in the memory system",
+			inputSchema: {},
+		},
+		async (): Promise<ToolResult> => {
+			logger.debug("mem_list_projects called");
 
-  if (context.unresolvedErrors.length > 0) {
-    lines.push("## Unresolved Errors");
-    lines.push("");
-    for (const error of context.unresolvedErrors) {
-      lines.push(`> [!danger] ${error.type}`);
-      lines.push(`> ${error.message}`);
-      lines.push(`> Last seen: ${error.lastSeen}`);
-      lines.push("");
-    }
-  }
+			try {
+				const projects = listProjects();
 
-  if (context.activeDecisions.length > 0) {
-    lines.push("## Active Decisions");
-    lines.push("");
-    for (const decision of context.activeDecisions) {
-      lines.push(`### ${decision.title}`);
-      lines.push(decision.decision);
-      lines.push("");
-    }
-  }
+				if (projects.length === 0) {
+					return {
+						content: [{ type: "text", text: "No projects found in memory system." }],
+					};
+				}
 
-  if (context.patterns.length > 0) {
-    lines.push("## Relevant Patterns");
-    lines.push("");
-    for (const pattern of context.patterns) {
-      lines.push(`- **${pattern.name}**: ${pattern.description}`);
-    }
-    lines.push("");
-  }
+				const output = `Found ${projects.length} projects:\n\n${projects.map((p) => `- ${p}`).join("\n")}`;
 
-  return lines.join("\n");
+				return {
+					content: [{ type: "text", text: output }],
+				};
+			} catch (error) {
+				logger.error("mem_list_projects error", { error });
+				return {
+					content: [{ type: "text", text: `List error: ${error}` }],
+					isError: true,
+				};
+			}
+		}
+	);
+
+	// ========================================================================
+	// mem_generate_canvas - Generate Obsidian canvas visualizations
+	// ========================================================================
+	server.registerTool(
+		"mem_generate_canvas",
+		{
+			title: "Generate Canvas",
+			description:
+				"Generate Obsidian canvas visualizations for a project. Creates dashboard (grid layout), timeline (chronological decisions), and graph (radial knowledge graph) canvases.",
+			inputSchema: {
+				project: z.string().min(1).describe("Project name"),
+				canvas_type: z
+					.enum(["dashboard", "timeline", "graph", "all"])
+					.default("all")
+					.describe("Type of canvas to generate (default: all)"),
+			},
+		},
+		async ({ project, canvas_type }): Promise<ToolResult> => {
+			logger.debug("mem_generate_canvas called", { project, canvas_type });
+
+			// Input validation
+			if (!project || project.trim().length === 0) {
+				return {
+					content: [{ type: "text", text: "Error: project cannot be empty" }],
+					isError: true,
+				};
+			}
+
+			try {
+				// Check if project exists - validate slug is non-empty after normalization
+				const projectSlug = slugifyProjectName(project);
+
+				if (projectSlug.length === 0) {
+					return {
+						content: [{ type: "text", text: `Error: invalid project name '${project}'. Name must contain at least one alphanumeric character.` }],
+						isError: true,
+					};
+				}
+
+				const projectPath = getProjectPath(projectSlug);
+
+				if (!existsSync(projectPath)) {
+					return {
+						content: [{ type: "text", text: `Error: project '${project}' not found` }],
+						isError: true,
+					};
+				}
+
+				let generatedPaths: string[] = [];
+
+				switch (canvas_type) {
+					case "dashboard":
+						generatedPaths = generateDashboardCanvas(projectSlug);
+						break;
+					case "timeline":
+						generatedPaths = generateTimelineCanvas(projectSlug);
+						break;
+					case "graph":
+						generatedPaths = generateGraphCanvas(projectSlug);
+						break;
+					case "all":
+					default:
+						generatedPaths = generateAllCanvases(projectSlug);
+						break;
+				}
+
+				if (generatedPaths.length === 0) {
+					return {
+						content: [{ type: "text", text: "No canvases generated (possibly skipped due to updateStrategy)" }],
+					};
+				}
+
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Generated ${generatedPaths.length} canvas(es):\n${generatedPaths.map((p) => `- ${p}`).join("\n")}`,
+						},
+					],
+				};
+			} catch (error) {
+				logger.error("mem_generate_canvas error", { error });
+				return {
+					content: [{ type: "text", text: `Canvas generation error: ${error}` }],
+					isError: true,
+				};
+			}
+		}
+	);
+
+	// ========================================================================
+	// mem_file_ops - Cross-platform file operations
+	// ========================================================================
+	server.registerTool(
+		"mem_file_ops",
+		{
+			title: "File Operations",
+			description:
+				"Cross-platform file operations for vault management (delete, move, mkdir). Validates paths and prevents operations on category index files.",
+			inputSchema: {
+				action: z.enum(["delete", "move", "mkdir"]).describe("Operation to perform"),
+				path: z.string().describe("Target file/folder path (relative to vault)"),
+				destination: z.string().optional().describe("Destination path for move action"),
+			},
+		},
+		async ({ action, path: targetPath, destination }): Promise<ToolResult> => {
+			logger.debug("mem_file_ops called", { action, path: targetPath, destination });
+
+			try {
+				const vaultPath = config.vault.path;
+
+				// Validate target path is within vault
+				const validatedPath = validatePath(targetPath, vaultPath);
+
+				// Security: Prevent operations on category index files
+				const filename = basename(validatedPath);
+				const filenameWithoutExt = filename.replace(/\.md$/, "");
+				const isIndexFile = ["decisions", "patterns", "errors", "research", "knowledge", "sessions"].includes(filenameWithoutExt);
+
+				if (isIndexFile && filename.endsWith(".md")) {
+					logger.warn("mem_file_ops: blocked operation on category index file", { path: targetPath });
+					return {
+						content: [{ type: "text", text: `Error: Cannot perform operations on category index files (${filename})` }],
+						isError: true,
+					};
+				}
+
+				switch (action) {
+					case "delete": {
+						if (!existsSync(validatedPath)) {
+							return {
+								content: [{ type: "text", text: `Error: File not found: ${targetPath}` }],
+								isError: true,
+							};
+						}
+
+						unlinkSync(validatedPath);
+						logger.info("mem_file_ops: deleted file", { path: targetPath });
+
+						return {
+							content: [{ type: "text", text: `Deleted: ${targetPath}` }],
+						};
+					}
+
+					case "move": {
+						if (!destination) {
+							return {
+								content: [{ type: "text", text: "Error: destination parameter required for move action" }],
+								isError: true,
+							};
+						}
+
+						if (!existsSync(validatedPath)) {
+							return {
+								content: [{ type: "text", text: `Error: Source file not found: ${targetPath}` }],
+								isError: true,
+							};
+						}
+
+						// Validate destination path
+						const validatedDest = validatePath(destination, vaultPath);
+
+						// Security: Prevent moving TO a category index file path
+						const destFilename = basename(validatedDest);
+						const destFilenameWithoutExt = destFilename.replace(/\.md$/, "");
+						const isDestIndexFile = ["decisions", "patterns", "errors", "research", "knowledge", "sessions"].includes(destFilenameWithoutExt);
+
+						if (isDestIndexFile && destFilename.endsWith(".md")) {
+							logger.warn("mem_file_ops: blocked move to category index file path", { destination });
+							return {
+								content: [{ type: "text", text: `Error: Cannot move to category index file path (${destFilename})` }],
+								isError: true,
+							};
+						}
+
+						// Check if destination already exists
+						if (existsSync(validatedDest)) {
+							return {
+								content: [{ type: "text", text: `Error: Destination already exists: ${destination}` }],
+								isError: true,
+							};
+						}
+
+						// Ensure destination directory exists
+						const destDir = dirname(validatedDest);
+						if (!existsSync(destDir)) {
+							mkdirSync(destDir, { recursive: true });
+						}
+
+						renameSync(validatedPath, validatedDest);
+						logger.info("mem_file_ops: moved file", { from: targetPath, to: destination });
+
+						return {
+							content: [{ type: "text", text: `Moved: ${targetPath} → ${destination}` }],
+						};
+					}
+
+					case "mkdir": {
+						// Create directory with recursive option
+						mkdirSync(validatedPath, { recursive: true });
+						logger.info("mem_file_ops: created directory", { path: targetPath });
+
+						return {
+							content: [{ type: "text", text: `Created directory: ${targetPath}` }],
+						};
+					}
+
+					default: {
+						return {
+							content: [{ type: "text", text: `Error: Unknown action: ${action}` }],
+							isError: true,
+						};
+					}
+				}
+			} catch (error) {
+				logger.error("mem_file_ops error", { error, action, path: targetPath });
+				return {
+					content: [{ type: "text", text: `File operation error: ${error}` }],
+					isError: true,
+				};
+			}
+		}
+	);
+
+	// Start server
+	const transport = new StdioServerTransport();
+	await server.connect(transport);
+
+	logger.info("MCP server connected");
 }
 
 main().catch((error) => {
-  console.error("MCP server error:", error);
-  process.exit(1);
+	console.error("MCP server error:", error);
+	process.exit(1);
 });

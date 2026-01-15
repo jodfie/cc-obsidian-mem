@@ -1,5 +1,5 @@
 {
-  "description": "cc-obsidian-mem memory system hooks",
+  "description": "cc-obsidian-mem memory system hooks - SQLite architecture",
   "hooks": {
     "SessionStart": [
       {
@@ -35,36 +35,13 @@
         ]
       }
     ],
-    "PreCompact": [
-      {
-        "matcher": "auto|manual",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bun run \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/pre-compact.ts\"",
-            "timeout": 60
-          }
-        ]
-      }
-    ],
     "Stop": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "bun run \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/session-end.ts\" --type=stop",
-            "timeout": 60
-          }
-        ]
-      }
-    ],
-    "SessionEnd": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bun run \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/session-end.ts\" --type=end",
-            "timeout": 60
+            "command": "bun run \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/stop.ts\"",
+            "timeout": 5
           }
         ]
       }
