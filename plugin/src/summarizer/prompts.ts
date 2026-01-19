@@ -22,10 +22,14 @@ Categories to extract:
 - **qa**: Important questions asked and answers found
 
 For each piece of knowledge:
-1. Make it concise but complete (2-5 sentences)
-2. Focus on WHY, not just WHAT
-3. Make it reusable for future similar situations
-4. Include relevant context (what project, what problem)
+1. **Title must be SHORT**: 2-4 words only (e.g., "Session persistence fix", "Jaccard similarity", "Config validation")
+   - NO verbose titles like "use-writeifchanged-pattern-to-avoid-unnecessary-file-writes"
+   - NO prefixes like "QA:", "How to", "Pattern for"
+   - Capture the core concept in 2-4 words
+2. Make content concise but complete (2-5 sentences)
+3. Focus on WHY, not just WHAT
+4. Make it reusable for future similar situations
+5. Include relevant context (what project, what problem)
 
 OUTPUT FORMAT - respond with ONLY this JSON structure, nothing else:
 {

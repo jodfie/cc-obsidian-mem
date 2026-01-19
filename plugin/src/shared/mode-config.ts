@@ -169,7 +169,7 @@ Resume observing from where we left off.`,
 
 	summary_footer: `The summary should help future sessions understand what was accomplished.`,
 
-	xml_title_placeholder: "Brief title describing the observation",
+	xml_title_placeholder: "2-4 word title (e.g., 'Config validation', 'Session fix')",
 	xml_subtitle_placeholder: "Optional subtitle with additional context",
 	xml_fact_placeholder: "A specific, actionable fact",
 	xml_narrative_placeholder: "Contextual narrative explaining the observation",
