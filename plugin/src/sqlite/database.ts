@@ -9,6 +9,35 @@ import { dirname } from "path";
 import { runMigrations } from "./migrations.js";
 import type { Logger } from "../shared/logger.js";
 
+// SQLite error codes that indicate transient lock issues
+const RETRYABLE_ERROR_CODES = [
+	"SQLITE_BUSY",
+	"SQLITE_BUSY_RECOVERY",
+	"SQLITE_LOCKED",
+];
+
+// Retry configuration
+const MAX_RETRIES = 3;
+const INITIAL_DELAY_MS = 50;
+
+/**
+ * Sleep for a given number of milliseconds
+ */
+function sleep(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Check if an error is retryable (transient SQLite lock)
+ */
+function isRetryableError(error: unknown): boolean {
+	if (error && typeof error === "object" && "code" in error) {
+		const code = (error as { code: string }).code;
+		return RETRYABLE_ERROR_CODES.includes(code);
+	}
+	return false;
+}
+
 /**
  * Initialize and configure SQLite database
  */
@@ -32,8 +61,8 @@ export function initDatabase(dbPath: string, logger: Logger): Database {
 		logger.warn("Failed to set database file permissions", { error });
 	}
 
-	// Configure database
-	configureDatabase(db, logger);
+	// Configure database with retry logic for transient lock errors
+	configureDatabaseWithRetry(db, logger);
 
 	// Run migrations
 	try {
@@ -45,6 +74,50 @@ export function initDatabase(dbPath: string, logger: Logger): Database {
 	}
 
 	return db;
+}
+
+/**
+ * Configure database with retry logic for transient lock errors
+ * Uses exponential backoff: 50ms, 100ms, 200ms
+ */
+function configureDatabaseWithRetry(db: Database, logger: Logger): void {
+	let lastError: unknown;
+
+	for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+		try {
+			configureDatabase(db, logger);
+			return; // Success
+		} catch (error) {
+			lastError = error;
+
+			if (!isRetryableError(error)) {
+				// Non-retryable error, throw immediately
+				throw error;
+			}
+
+			// Calculate delay with exponential backoff
+			const delayMs = INITIAL_DELAY_MS * Math.pow(2, attempt);
+
+			logger.debug("Database configuration failed with retryable error, retrying", {
+				attempt: attempt + 1,
+				maxRetries: MAX_RETRIES,
+				delayMs,
+				errorCode: (error as { code?: string }).code,
+			});
+
+			// Synchronous sleep using Atomics.wait (works in Bun)
+			const sharedBuffer = new SharedArrayBuffer(4);
+			const int32 = new Int32Array(sharedBuffer);
+			Atomics.wait(int32, 0, 0, delayMs);
+		}
+	}
+
+	// All retries exhausted
+	logger.error("Database configuration failed after all retries", {
+		attempts: MAX_RETRIES,
+		lastError,
+	});
+	throw lastError;
 }
 
 /**
